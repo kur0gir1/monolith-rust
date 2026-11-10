@@ -9,13 +9,29 @@ interface VideoPlayerProps {
   onBack: () => void;
 }
 
+function formatTime(secs: number): string {
+  if (!Number.isFinite(secs) || secs < 0) return '00:00';
+  const total = Math.floor(secs);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s
+      .toString()
+      .padStart(2, '0')}`;
+  }
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   item,
   serverStatus,
   onBack,
 }) => {
+  const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const seekBarRef = useRef<HTMLDivElement>(null);
 
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number>(() => {
     return item.metadata?.audio_tracks?.[0]?.index ?? 0;
@@ -25,10 +41,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [isSwitchingAudio, setIsSwitchingAudio] = useState(false);
 
+  // Custom HUD transport state
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(() => item.metadata?.duration_seconds ?? 0);
+  const [bufferedEnd, setBufferedEnd] = useState<number>(0);
+  const [volume, setVolume] = useState<number>(1);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [playbackRate, setPlaybackRate] = useState<number>(1);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [hoverTime, setHoverTime] = useState<{ time: number; percent: number } | null>(null);
+
   const audioTracks: AudioTrack[] = item.metadata?.audio_tracks ?? [];
   const subtitleTracks: SubtitleTrack[] = item.metadata?.subtitle_tracks ?? [];
 
-  // Transcoder badge string
   const transcoderBadge = serverStatus?.transcoder
     ? `[TRANSCODE: ${serverStatus.transcoder.toUpperCase()}]`
     : serverStatus?.gpu_available
@@ -98,7 +124,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS fallback (Safari/iOS)
         video.src = streamUrl;
         video.addEventListener(
           'loadedmetadata',
@@ -118,10 +143,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     [item.id]
   );
 
-  // Initialize playback on mount (or when media item changes)
+  // Initialize playback on mount or when media item changes
   useEffect(() => {
     const initialAudio = item.metadata?.audio_tracks?.[0]?.index ?? 0;
     setSelectedAudioIndex(initialAudio);
+    setDuration(item.metadata?.duration_seconds ?? 0);
+    setCurrentTime(0);
     initStream(initialAudio, 0);
 
     return () => {
@@ -132,12 +159,198 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [initStream, item.id, item.metadata]);
 
+  // Attach HTML5 video event listeners for custom HUD state
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    const onTimeUpdate = () => {
+      setCurrentTime(video.currentTime);
+      if (video.buffered.length > 0) {
+        setBufferedEnd(video.buffered.end(video.buffered.length - 1));
+      }
+    };
+    const onDurationChange = () => {
+      const metaDur = item.metadata?.duration_seconds ?? 0;
+      const vidDur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      setDuration(Math.max(metaDur, vidDur));
+    };
+    const onVolumeChange = () => {
+      setVolume(video.volume);
+      setIsMuted(video.muted);
+    };
+
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    video.addEventListener('timeupdate', onTimeUpdate);
+    video.addEventListener('durationchange', onDurationChange);
+    video.addEventListener('volumechange', onVolumeChange);
+
+    return () => {
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('timeupdate', onTimeUpdate);
+      video.removeEventListener('durationchange', onDurationChange);
+      video.removeEventListener('volumechange', onVolumeChange);
+    };
+  }, [item.metadata?.duration_seconds]);
+
+  // Sync fullscreen state
+  useEffect(() => {
+    const onFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  // Transport actions
+  const togglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      video.play().catch(console.error);
+    } else {
+      video.pause();
+    }
+  }, []);
+
+  const seekBy = useCallback(
+    (deltaSeconds: number) => {
+      const video = videoRef.current;
+      if (!video) return;
+      const maxDur = duration > 0 ? duration : video.duration || 0;
+      const next = Math.max(0, Math.min(maxDur || Infinity, video.currentTime + deltaSeconds));
+      video.currentTime = next;
+      setCurrentTime(next);
+    },
+    [duration]
+  );
+
+  const seekTo = useCallback((targetSeconds: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = targetSeconds;
+    setCurrentTime(targetSeconds);
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setIsMuted(video.muted);
+  }, []);
+
+  const handleVolumeChange = useCallback((newVol: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const clamped = Math.max(0, Math.min(1, newVol));
+    video.volume = clamped;
+    video.muted = clamped === 0;
+    setVolume(clamped);
+    setIsMuted(clamped === 0);
+  }, []);
+
+  const cyclePlaybackSpeed = useCallback(() => {
+    const speeds = [0.5, 1, 1.25, 1.5, 2];
+    const nextIdx = (speeds.indexOf(playbackRate) + 1) % speeds.length;
+    const nextSpeed = speeds[nextIdx];
+    const video = videoRef.current;
+    if (video) {
+      video.playbackRate = nextSpeed;
+    }
+    setPlaybackRate(nextSpeed);
+  }, [playbackRate]);
+
+  const toggleFullscreen = useCallback(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (!document.fullscreenElement) {
+      stage.requestFullscreen().catch(console.error);
+    } else {
+      document.exitFullscreen().catch(console.error);
+    }
+  }, []);
+
+  const cycleSubtitles = useCallback(() => {
+    const textSubs = subtitleTracks.filter((s) => !s.is_bitmap);
+    if (textSubs.length === 0) return;
+    if (selectedSubtitleIndex === null) {
+      setSelectedSubtitleIndex(textSubs[0].index);
+    } else {
+      const curPos = textSubs.findIndex((s) => s.index === selectedSubtitleIndex);
+      if (curPos === -1 || curPos + 1 >= textSubs.length) {
+        setSelectedSubtitleIndex(null);
+      } else {
+        setSelectedSubtitleIndex(textSubs[curPos + 1].index);
+      }
+    }
+  }, [subtitleTracks, selectedSubtitleIndex]);
+
+  // Global keyboard shortcuts (Space, K, J, L, Arrows, F, M, C)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case ' ':
+        case 'k':
+          e.preventDefault();
+          togglePlay();
+          break;
+        case 'j':
+          e.preventDefault();
+          seekBy(-10);
+          break;
+        case 'l':
+          e.preventDefault();
+          seekBy(10);
+          break;
+        case 'arrowleft':
+          e.preventDefault();
+          seekBy(-5);
+          break;
+        case 'arrowright':
+          e.preventDefault();
+          seekBy(5);
+          break;
+        case 'arrowup':
+          e.preventDefault();
+          handleVolumeChange(volume + 0.1);
+          break;
+        case 'arrowdown':
+          e.preventDefault();
+          handleVolumeChange(volume - 0.1);
+          break;
+        case 'm':
+          e.preventDefault();
+          toggleMute();
+          break;
+        case 'f':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+        case 'c':
+          e.preventDefault();
+          cycleSubtitles();
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [togglePlay, seekBy, handleVolumeChange, volume, toggleMute, toggleFullscreen, cycleSubtitles]);
+
   // Handle Subtitle track switching
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    // Remove existing dynamic subtitle tracks
     const existingTracks = video.querySelectorAll('track');
     existingTracks.forEach((t) => t.remove());
 
@@ -160,7 +373,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         video.appendChild(track);
       }
     } else {
-      // Disable all subtitle tracks
       for (let i = 0; i < video.textTracks.length; i++) {
         video.textTracks[i].mode = 'disabled';
       }
@@ -175,69 +387,239 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setStreamStatus(`SWITCHING AUDIO TO TRACK ${index}...`);
 
     try {
-      // Notify backend to remap audio track
       await api.switchAudioTrack(item.id, index);
     } catch (err) {
       console.warn('Backend audio switch notification failed (will reload stream URL):', err);
     }
 
     const video = videoRef.current;
-    const currentTime = video ? video.currentTime : 0;
+    const resumePos = video ? video.currentTime : 0;
 
     setSelectedAudioIndex(index);
-    initStream(index, currentTime);
+    initStream(index, resumePos);
     setIsSwitchingAudio(false);
+  };
+
+  const effectiveDuration = Math.max(duration, currentTime, 1);
+  const progressPercent = Math.min(100, Math.max(0, (currentTime / effectiveDuration) * 100));
+  const bufferPercent = Math.min(100, Math.max(0, (bufferedEnd / effectiveDuration) * 100));
+  const effectiveVolume = isMuted ? 0 : volume;
+
+  const handleTimelineMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const bar = seekBarRef.current;
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHoverTime({
+      time: ratio * effectiveDuration,
+      percent: ratio * 100,
+    });
   };
 
   return (
     <div className="player-container">
       {/* Player Header */}
       <div className="player-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        <div className="player-header-left">
           <button type="button" className="brutalist-btn" onClick={onBack}>
             [&lt; RETURN TO BROWSER]
           </button>
-          <div className="player-title">NOW STREAMING: {item.file_name}</div>
+          <div className="player-title" title={item.file_name}>
+            NOW STREAMING: {item.file_name}
+          </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div className="player-header-badges">
           <span className="badge badge-inverted">{transcoderBadge}</span>
           <span className="badge">[STATE: {streamStatus}]</span>
         </div>
       </div>
 
-      {/* Video Element */}
-      <div className="player-video-wrapper">
-        <video
-          ref={videoRef}
-          className="player-video-element"
-          controls
-          playsInline
-          autoPlay
-        />
-        {playerError && (
-          <div
-            style={{
-              position: 'absolute',
-              background: '#000000',
-              border: '2px solid #FFFFFF',
-              padding: '20px',
-              maxWidth: '80%',
-              textAlign: 'center',
-            }}
-          >
-            <h3 style={{ fontSize: '1rem', marginBottom: '8px' }}>[STREAM ERROR]</h3>
-            <p style={{ fontSize: '0.8rem' }}>{playerError}</p>
-            <button
-              type="button"
-              className="brutalist-btn badge-inverted"
-              style={{ marginTop: '12px' }}
-              onClick={() => initStream(selectedAudioIndex, 0)}
+      {/* Custom Brutalist HUD Video Stage */}
+      <div ref={stageRef} className={`player-stage ${isFullscreen ? 'is-fullscreen' : ''}`}>
+        <div className="player-video-wrapper" onClick={togglePlay} onDoubleClick={toggleFullscreen}>
+          <video
+            ref={videoRef}
+            className="player-video-element"
+            playsInline
+            autoPlay
+          />
+
+          {/* Center Paused / Buffering HUD Indicator */}
+          {!isPlaying && !playerError && (
+            <div className="hud-center-badge">
+              {streamStatus === 'CONNECTING' ? '[BUFFERING STREAM...]' : '[PAUSED // CLICK OR SPACE]'}
+            </div>
+          )}
+
+          {playerError && (
+            <div
+              className="hud-error-box"
+              onClick={(e) => e.stopPropagation()}
             >
-              [RETRY STREAM]
-            </button>
+              <h3 style={{ fontSize: '1rem', marginBottom: '8px' }}>[STREAM ERROR]</h3>
+              <p style={{ fontSize: '0.8rem' }}>{playerError}</p>
+              <button
+                type="button"
+                className="brutalist-btn badge-inverted"
+                style={{ marginTop: '12px' }}
+                onClick={() => initStream(selectedAudioIndex, currentTime)}
+              >
+                [RETRY STREAM]
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Custom Brutalist HUD Transport Deck */}
+        <div className="hud-deck">
+          {/* Interactive Scrub Timeline with Time Preview */}
+          <div
+            ref={seekBarRef}
+            className="hud-timeline-wrapper"
+            onMouseMove={handleTimelineMouseMove}
+            onMouseLeave={() => setHoverTime(null)}
+          >
+            {hoverTime && (
+              <div
+                className="hud-timeline-tooltip"
+                style={{ left: `${Math.min(94, Math.max(6, hoverTime.percent))}%` }}
+              >
+                [{formatTime(hoverTime.time)}]
+              </div>
+            )}
+            <div className="hud-timeline-buffer" style={{ width: `${bufferPercent}%` }} />
+            <input
+              type="range"
+              aria-label="Seek timeline"
+              aria-valuetext={`${formatTime(currentTime)} of ${formatTime(effectiveDuration)}`}
+              className="brutalist-slider hud-seek-slider"
+              min={0}
+              max={effectiveDuration}
+              step={0.1}
+              value={currentTime}
+              style={
+                {
+                  '--attr-min': 0,
+                  '--attr-max': effectiveDuration,
+                  '--control-value': currentTime,
+                  '--slider-progress': `${progressPercent}%`,
+                } as React.CSSProperties
+              }
+              onChange={(e) => seekTo( parseFloat(e.target.value) )}
+            />
           </div>
-        )}
+
+          {/* Primary Transport Controls Row */}
+          <div className="hud-controls-row">
+            <div className="hud-controls-group">
+              <button
+                type="button"
+                className="brutalist-btn sm hud-btn"
+                onClick={togglePlay}
+                title="Play / Pause (Space or K)"
+              >
+                {isPlaying ? '[❚❚ PAUSE]' : '[▶ PLAY]'}
+              </button>
+
+              <button
+                type="button"
+                className="brutalist-btn sm hud-btn"
+                onClick={() => seekBy(-10)}
+                title="Rewind 10s (J)"
+              >
+                [-10S]
+              </button>
+
+              <button
+                type="button"
+                className="brutalist-btn sm hud-btn"
+                onClick={() => seekBy(10)}
+                title="Forward 10s (L)"
+              >
+                [+10S]
+              </button>
+
+              <span className="hud-timecode">
+                {formatTime(currentTime)} / {formatTime(effectiveDuration)}
+              </span>
+            </div>
+
+            <div className="hud-controls-group">
+              {/* Volume Control */}
+              <div className="hud-volume-box">
+                <button
+                  type="button"
+                  className="brutalist-btn sm hud-btn"
+                  onClick={toggleMute}
+                  title="Mute / Unmute (M)"
+                >
+                  {isMuted || effectiveVolume === 0 ? '[MUTE]' : `[VOL ${Math.round(effectiveVolume * 100)}%]`}
+                </button>
+                <input
+                  type="range"
+                  aria-label="Volume"
+                  aria-valuetext={`${Math.round(effectiveVolume * 100)}%`}
+                  className="brutalist-slider hud-volume-slider"
+                  min={0}
+                  max={1}
+                  step={0.02}
+                  value={effectiveVolume}
+                  style={
+                    {
+                      '--attr-min': 0,
+                      '--attr-max': 1,
+                      '--control-value': effectiveVolume,
+                      '--slider-progress': `${effectiveVolume * 100}%`,
+                    } as React.CSSProperties
+                  }
+                  onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                />
+              </div>
+
+              {/* Playback Speed */}
+              <button
+                type="button"
+                className="brutalist-btn sm hud-btn"
+                onClick={cyclePlaybackSpeed}
+                title="Cycle Playback Speed"
+              >
+                [{playbackRate}X]
+              </button>
+
+              {/* Subtitle Quick Cycle */}
+              <button
+                type="button"
+                className={`brutalist-btn sm hud-btn ${selectedSubtitleIndex !== null ? 'active' : ''}`}
+                onClick={cycleSubtitles}
+                title="Cycle Subtitles (C)"
+              >
+                [CC: {selectedSubtitleIndex !== null ? `#${selectedSubtitleIndex}` : 'OFF'}]
+              </button>
+
+              {/* Fullscreen Toggle */}
+              <button
+                type="button"
+                className="brutalist-btn sm hud-btn"
+                onClick={toggleFullscreen}
+                title="Toggle Fullscreen (F)"
+              >
+                {isFullscreen ? '[EXIT FULL]' : '[FULLSCREEN]'}
+              </button>
+            </div>
+          </div>
+
+          {/* Shortcut Legend Bar */}
+          <div className="hud-shortcuts-bar">
+            <span>KEYS: [SPACE/K] PLAY/PAUSE</span>
+            <span>[J/L] ±10S</span>
+            <span>[←/→] ±5S</span>
+            <span>[↑/↓] VOL</span>
+            <span>[M] MUTE</span>
+            <span>[C] SUBS</span>
+            <span>[F] FULLSCREEN</span>
+          </div>
+        </div>
       </div>
 
       {/* Dynamic Controls Grid: Audio & Subtitle Track Selectors */}
@@ -247,7 +629,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           <div className="control-panel-title">
             <span>[AUDIO TRACK ROUTING]</span>
             <span className="badge">
-              ACTIVE: #{selectedAudioIndex} ({audioTracks.find((a) => a.index === selectedAudioIndex)?.language?.toUpperCase() || 'DEFAULT'})
+              ACTIVE: #{selectedAudioIndex} (
+              {audioTracks
+                .find((a) => a.index === selectedAudioIndex)
+                ?.language?.toUpperCase() || 'DEFAULT'}
+              )
             </span>
           </div>
 
@@ -267,7 +653,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   }}
                 >
                   <div>
-                    <strong>TRACK #{track.index}:</strong> {track.title || track.codec.toUpperCase()} [
+                    <strong>TRACK #{track.index}:</strong>{' '}
+                    {track.title || track.codec.toUpperCase()} [
                     {track.language ? track.language.toUpperCase() : 'UND'}]
                   </div>
                   <div>

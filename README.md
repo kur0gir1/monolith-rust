@@ -14,7 +14,7 @@ It indexes local video libraries strictly offline using `ffprobe`, extracts and 
 - **Hardware-Accelerated HLS Transcoding**:
   - Primary: NVIDIA NVENC (`-hwaccel cuda -hwaccel_output_format cuda -c:v h264_nvenc -preset p4 -b:v 5M`)
   - Fallback: Automatic detection and fallback to CPU (`-c:v libx264 -preset veryfast -b:v 5M`)
-  - Serves `.m3u8` master/variant playlists and 4-second `.ts` segments over `0.0.0.0:3000`.
+  - Serves `.m3u8` master/variant playlists and 2-second `.ts` segments over `0.0.0.0:9000`.
 - **Live Audio & Subtitle Track Routing**:
   - Switch multi-language audio streams on the fly (`-map 0:v:0 -map 0:a:<index>`).
   - Real-time embedded subtitle conversion to browser-ready WebVTT (`subs.vtt`).
@@ -59,7 +59,7 @@ cargo run
 ```
 Once launched:
 - **Desktop Host**: Opens the native Monolith window (`MONOLITH // OFFLINE STREAMING`).
-- **LAN Web Access**: Any device on your local network can browse and stream from `http://<YOUR_LAN_IP>:3000`.
+- **LAN Web Access**: Any device on your local network can browse and stream from `http://<YOUR_LAN_IP>:9000`.
 
 ---
 

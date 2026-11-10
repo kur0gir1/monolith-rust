@@ -144,7 +144,7 @@ pub async fn trigger_scan(
 }
 
 /// GET /api/status
-pub async fn get_status() -> Json<serde_json::Value> {
+pub async fn get_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let lan_ip = match local_ip_address::local_ip() {
         Ok(ip) => ip.to_string(),
         Err(_) => "127.0.0.1".to_string(),
@@ -158,11 +158,13 @@ pub async fn get_status() -> Json<serde_json::Value> {
     } else {
         "CPU LIBX264".to_string()
     };
+    let selected_directory = state.get_selected_directory().await;
 
     Json(serde_json::json!({
         "lan_ip": lan_ip,
-        "port": 3000,
+        "port": 9000,
         "gpu_available": gpu_available,
-        "transcoder": transcoder
+        "transcoder": transcoder,
+        "selected_directory": selected_directory
     }))
 }

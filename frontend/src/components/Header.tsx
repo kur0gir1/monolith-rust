@@ -36,19 +36,10 @@ export const Header: React.FC<HeaderProps> = ({
     setManualPath('');
   };
 
-  // Connection badge text
-  const connectionBadge = isTauri
-    ? '[MODE: TAURI IPC]'
-    : serverStatus?.lan_ip
-    ? `[LAN: http://${serverStatus.lan_ip}:${serverStatus.port}]`
-    : `[HOST: ${window.location.host || '127.0.0.1:3000'}]`;
-
-  // Transcoder badge
-  const transcoderBadge = serverStatus?.transcoder
-    ? `[TRANSCODE: ${serverStatus.transcoder.toUpperCase()}]`
-    : serverStatus?.gpu_available
-    ? '[TRANSCODE: NVENC CUDA]'
-    : '[TRANSCODE: CPU LIBX264]';
+  // Dynamic LAN URL shown both in the .exe and on web clients
+  const lanUrl = serverStatus?.lan_ip
+    ? `http://${serverStatus.lan_ip}:${serverStatus.port || 9000}`
+    : `http://127.0.0.1:9000`;
 
   return (
     <>
@@ -72,8 +63,9 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="header-actions">
-          <span className="badge badge-inverted">{connectionBadge}</span>
-          <span className="badge">{transcoderBadge}</span>
+          <span className="badge badge-inverted" title="Open this URL on any device on your Wi-Fi / LAN">
+            [LAN URL: {lanUrl}]
+          </span>
 
           <button
             type="button"
@@ -101,10 +93,8 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
         </div>
         <div className="status-group">
-          <span>STATUS:</span>
-          <span className="badge">
-            {isScanning ? 'INDEXING LOCAL STORAGE...' : 'STANDBY // READY'}
-          </span>
+          <span>STREAM URL:</span>
+          <span className="badge badge-inverted">{lanUrl}</span>
         </div>
       </div>
 
