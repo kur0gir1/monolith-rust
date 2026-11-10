@@ -287,6 +287,22 @@ export class ApiClient {
     if (!res.ok) {
       throw new Error(`Failed to kill tunnel: HTTP ${res.status}`);
     }
+    try {
+      await this.resetParty();
+    } catch (err) {
+      console.warn('Failed to reset party on kill tunnel:', err);
+    }
+    return res.json();
+  }
+
+  async resetParty(): Promise<PartyState> {
+    const res = await fetch(appendInviteParam(`${this.baseUrl}/api/party/reset`), {
+      method: 'POST',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to reset watch party: HTTP ${res.status}`);
+    }
     return res.json();
   }
 

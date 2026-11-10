@@ -155,18 +155,28 @@ export const App: React.FC = () => {
     await loadData();
   };
 
+  const handleKillTunnel = useCallback(async () => {
+    setPartyState(null);
+    try {
+      await api.resetParty();
+    } catch (err) {
+      console.warn('Failed to reset party on kill tunnel:', err);
+    }
+  }, []);
+
   return (
     <div className="app-container">
       {/* Global Grainy SVG Terminal Noise Overlay */}
       <NoiseOverlay />
 
-      {/* Brutalist Header */}
+      {/* Modern Header */}
       <Header
         serverStatus={serverStatus}
         selectedDirectory={selectedDirectory}
         onSelectDirectory={handleSelectDirectory}
         isScanning={isScanning}
         partyState={partyState}
+        onKillTunnel={handleKillTunnel}
       />
 
       {/* Main View Area */}
@@ -213,15 +223,17 @@ export const App: React.FC = () => {
             {/* Watch Party Live Banner when someone is watching a video */}
             {view === 'browser' &&
               partyState?.media_id &&
+              (partyState.is_playing || partyState.active_peers > 1) &&
               mediaItems.some((m) => m.id === partyState.media_id) && (
                 <div className="party-live-banner">
-                  <div>
-                    <span className="badge badge-inverted" style={{ marginRight: '10px' }}>
-                      [WATCH PARTY LIVE]
+                  <div className="party-live-banner-content">
+                    <span className="live-indicator-dot" aria-hidden="true" />
+                    <span className="badge badge-inverted">
+                      WATCH PARTY LIVE
                     </span>
-                    <strong>{partyState.media_title || 'SHARED STREAM'}</strong>
-                    <span style={{ opacity: 0.75, marginLeft: '10px' }}>
-                      ({partyState.is_playing ? 'PLAYING' : 'PAUSED'} //{' '}
+                    <strong className="party-media-title">{partyState.media_title || 'SHARED STREAM'}</strong>
+                    <span className="party-status-time">
+                      ({partyState.is_playing ? 'PLAYING' : 'PAUSED'} •{' '}
                       {Math.floor(partyState.current_time / 60)}:
                       {Math.floor(partyState.current_time % 60)
                         .toString()
@@ -234,7 +246,7 @@ export const App: React.FC = () => {
                     className="brutalist-btn sm active"
                     onClick={handleJoinPartyMedia}
                   >
-                    [JOIN STREAM NOW ▶]
+                    JOIN STREAM NOW ▶
                   </button>
                 </div>
               )}

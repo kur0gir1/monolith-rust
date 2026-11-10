@@ -14,8 +14,8 @@ use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::server::handlers::{
     get_media_by_id, get_media_index, get_party_state, get_poster, get_status, get_tunnel_status,
-    kill_tunnel, leave_party, open_in_browser, rotate_tunnel_token, start_tunnel, stop_tunnel,
-    trigger_scan, update_party_state,
+    kill_tunnel, leave_party, open_in_browser, reset_party, rotate_tunnel_token, start_tunnel,
+    stop_tunnel, trigger_scan, update_party_state,
 };
 use crate::server::stream_handler::{
     get_master_playlist, get_segment, get_subtitles, get_variant_playlist, switch_audio,
@@ -197,6 +197,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/tunnel/rotate", post(rotate_tunnel_token))
         .route("/party", get(get_party_state).post(update_party_state))
         .route("/party/leave", post(leave_party))
+        .route("/party/reset", post(reset_party))
         .route("/open-browser", post(open_in_browser));
 
     let mut frontend_dist = PathBuf::from("frontend/dist");

@@ -8,6 +8,7 @@ interface HeaderProps {
   onSelectDirectory: (path?: string) => Promise<void>;
   isScanning: boolean;
   partyState?: PartyState | null;
+  onKillTunnel?: () => Promise<void> | void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectDirectory,
   isScanning,
   partyState,
+  onKillTunnel,
 }) => {
   const [showPathModal, setShowPathModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
@@ -79,6 +81,9 @@ export const Header: React.FC<HeaderProps> = ({
   const handleKillTunnel = async () => {
     setIsTunnelBusy(true);
     try {
+      if (onKillTunnel) {
+        await onKillTunnel();
+      }
       const st = await api.killTunnel();
       setTunnelStatus(st);
     } catch (err) {

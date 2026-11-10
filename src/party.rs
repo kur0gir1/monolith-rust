@@ -152,6 +152,20 @@ impl PartyManager {
         guard.state.active_peers = guard.peers.len().max(1);
         guard.state.clone()
     }
+
+    pub async fn reset(&self) -> PartyState {
+        let mut guard = self.inner.write().await;
+        guard.peers.clear();
+        guard.state.media_id = None;
+        guard.state.media_title = None;
+        guard.state.is_playing = false;
+        guard.state.current_time = 0.0;
+        guard.state.active_peers = 0;
+        guard.state.event_seq += 1;
+        guard.state.updated_by = "system_reset".to_string();
+        guard.state.updated_at_ms = now_ms();
+        guard.state.clone()
+    }
 }
 
 #[cfg(test)]
@@ -169,5 +183,35 @@ mod tests {
 
         let st3 = mgr.remove_peer("peer-alpha").await;
         assert_eq!(st3.active_peers, 1);
+    }
+
+    #[tokio::test]
+    async fn test_party_reset() {
+        let mgr = PartyManager::new();
+        mgr.update(PartyUpdateRequest {
+            peer_id: "host".to_string(),
+            enabled: Some(true),
+            media_id: Some("movie-123".to_string()),
+            media_title: Some("Inception".to_string()),
+            is_playing: Some(true),
+            current_time: Some(42.5),
+            audio_track: None,
+            subtitle_track: None,
+        })
+        .await;
+
+        let before = mgr.get_state(Some("guest")).await;
+        assert_eq!(before.media_id, Some("movie-123".to_string()));
+        assert_eq!(before.media_title, Some("Inception".to_string()));
+        assert!(before.is_playing);
+        assert!(before.active_peers >= 1);
+
+        let reset_state = mgr.reset().await;
+        assert_eq!(reset_state.media_id, None);
+        assert_eq!(reset_state.media_title, None);
+        assert!(!reset_state.is_playing);
+        assert_eq!(reset_state.current_time, 0.0);
+        assert_eq!(reset_state.active_peers, 0);
+        assert_eq!(reset_state.updated_by, "system_reset");
     }
 }

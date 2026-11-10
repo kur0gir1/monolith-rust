@@ -200,6 +200,7 @@ pub async fn stop_tunnel(State(state): State<AppState>) -> Json<TunnelStatus> {
 
 /// POST /api/tunnel/kill
 pub async fn kill_tunnel(State(state): State<AppState>) -> Json<TunnelStatus> {
+    state.party.reset().await;
     Json(state.tunnel.kill().await)
 }
 
@@ -244,6 +245,11 @@ pub async fn leave_party(
     } else {
         Json(state.party.get_state(None).await)
     }
+}
+
+/// POST /api/party/reset
+pub async fn reset_party(State(state): State<AppState>) -> Json<PartyState> {
+    Json(state.party.reset().await)
 }
 
 #[derive(Debug, Deserialize)]
