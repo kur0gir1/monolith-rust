@@ -4,12 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.monolith.stream",
   "build": {
-    "beforeDevCommand": "",
-    "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "",
     "frontendDist": "../frontend/dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
