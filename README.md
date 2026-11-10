@@ -63,23 +63,6 @@ Once launched:
 
 ---
 
-## REST API Endpoints (`0.0.0.0:3000`)
-
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/api/status` | Server LAN IP, port, GPU availability, and active transcoder mode |
-| `GET` | `/api/media` | Full indexed media catalog |
-| `GET` | `/api/media/:id` | Detailed stream metadata for a single media item |
-| `GET` | `/api/media/:id/poster` | Cached JPEG poster artwork |
-| `POST` | `/api/scan` | Trigger directory scan / rescan |
-| `GET` | `/api/stream/:id/master.m3u8` | HLS master playlist |
-| `GET` | `/api/stream/:id/index.m3u8` | HLS variant playlist (`?audio=<index>`) |
-| `GET` | `/api/stream/:id/:segment` | MPEG-TS (`.ts`) media chunk |
-| `POST` | `/api/stream/:id/audio` | Switch active audio stream index |
-| `GET` | `/api/stream/:id/subtitles/:sub_index/subs.vtt` | On-the-fly WebVTT subtitle extraction |
-
----
-
 ## License
 
 MIT
