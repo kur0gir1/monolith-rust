@@ -1,114 +1,156 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use tracing::debug;
 
 use crate::error::AppError;
 use crate::models::{AudioTrack, MediaMetadata, SubtitleTrack};
 
-/// Locates the `ffprobe` executable on the host system.
-pub fn find_ffprobe() -> PathBuf {
-    if let Ok(path) = std::env::var("FFPROBE_PATH") {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return p;
-        }
-    }
+/// Windows CREATE_NO_WINDOW process creation flag (`0x08000000`) to prevent console windows from flashing.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    #[cfg(windows)]
-    {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            let winget_path = PathBuf::from(local_app_data)
-                .join("Microsoft")
-                .join("WinGet")
-                .join("Links")
-                .join("ffprobe.exe");
-            if winget_path.exists() {
-                return winget_path;
-            }
-        }
-
-        if let Ok(output) = Command::new("where.exe").arg("ffprobe").output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let p = PathBuf::from(first_line.trim());
-                    if p.exists() {
-                        return p;
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Ok(output) = Command::new("which").arg("ffprobe").output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let p = PathBuf::from(first_line.trim());
-                    if p.exists() {
-                        return p;
-                    }
-                }
-            }
-        }
-    }
-
-    PathBuf::from("ffprobe")
+/// Extension helper to suppress flashing console windows on Windows for `std::process::Command`.
+pub trait NoWindowCommandExt {
+    fn no_window(&mut self) -> &mut Self;
 }
 
-/// Locates the `ffmpeg` executable on the host system.
-pub fn find_ffmpeg() -> PathBuf {
-    if let Ok(path) = std::env::var("FFMPEG_PATH") {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return p;
-        }
-    }
-
+impl NoWindowCommandExt for Command {
     #[cfg(windows)]
-    {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            let winget_path = PathBuf::from(local_app_data)
-                .join("Microsoft")
-                .join("WinGet")
-                .join("Links")
-                .join("ffmpeg.exe");
-            if winget_path.exists() {
-                return winget_path;
-            }
-        }
-
-        if let Ok(output) = Command::new("where.exe").arg("ffmpeg").output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let p = PathBuf::from(first_line.trim());
-                    if p.exists() {
-                        return p;
-                    }
-                }
-            }
-        }
+    fn no_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.creation_flags(CREATE_NO_WINDOW)
     }
 
     #[cfg(not(windows))]
-    {
-        if let Ok(output) = Command::new("which").arg("ffmpeg").output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let p = PathBuf::from(first_line.trim());
-                    if p.exists() {
-                        return p;
+    fn no_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
+static FFPROBE_BIN_CACHE: OnceLock<PathBuf> = OnceLock::new();
+static FFMPEG_BIN_CACHE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Locates the `ffprobe` executable on the host system (cached after first lookup).
+pub fn find_ffprobe() -> PathBuf {
+    FFPROBE_BIN_CACHE
+        .get_or_init(|| {
+            if let Ok(path) = std::env::var("FFPROBE_PATH") {
+                let p = PathBuf::from(path);
+                if p.exists() {
+                    return p;
+                }
+            }
+
+            #[cfg(windows)]
+            {
+                if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                    let winget_path = PathBuf::from(local_app_data)
+                        .join("Microsoft")
+                        .join("WinGet")
+                        .join("Links")
+                        .join("ffprobe.exe");
+                    if winget_path.exists() {
+                        return winget_path;
+                    }
+                }
+
+                if let Ok(output) = Command::new("where.exe")
+                    .arg("ffprobe")
+                    .no_window()
+                    .output()
+                {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if let Some(first_line) = stdout.lines().next() {
+                            let p = PathBuf::from(first_line.trim());
+                            if p.exists() {
+                                return p;
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
 
-    PathBuf::from("ffmpeg")
+            #[cfg(not(windows))]
+            {
+                if let Ok(output) = Command::new("which").arg("ffprobe").output() {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if let Some(first_line) = stdout.lines().next() {
+                            let p = PathBuf::from(first_line.trim());
+                            if p.exists() {
+                                return p;
+                            }
+                        }
+                    }
+                }
+            }
+
+            PathBuf::from("ffprobe")
+        })
+        .clone()
+}
+
+/// Locates the `ffmpeg` executable on the host system (cached after first lookup).
+pub fn find_ffmpeg() -> PathBuf {
+    FFMPEG_BIN_CACHE
+        .get_or_init(|| {
+            if let Ok(path) = std::env::var("FFMPEG_PATH") {
+                let p = PathBuf::from(path);
+                if p.exists() {
+                    return p;
+                }
+            }
+
+            #[cfg(windows)]
+            {
+                if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                    let winget_path = PathBuf::from(local_app_data)
+                        .join("Microsoft")
+                        .join("WinGet")
+                        .join("Links")
+                        .join("ffmpeg.exe");
+                    if winget_path.exists() {
+                        return winget_path;
+                    }
+                }
+
+                if let Ok(output) = Command::new("where.exe")
+                    .arg("ffmpeg")
+                    .no_window()
+                    .output()
+                {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if let Some(first_line) = stdout.lines().next() {
+                            let p = PathBuf::from(first_line.trim());
+                            if p.exists() {
+                                return p;
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                if let Ok(output) = Command::new("which").arg("ffmpeg").output() {
+                    if output.status.success() {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if let Some(first_line) = stdout.lines().next() {
+                            let p = PathBuf::from(first_line.trim());
+                            if p.exists() {
+                                return p;
+                            }
+                        }
+                    }
+                }
+            }
+
+            PathBuf::from("ffmpeg")
+        })
+        .clone()
 }
 
 /// Strictly offline media metadata probe using ffprobe JSON inspection.
@@ -125,6 +167,7 @@ pub fn probe_media_file(file_path: &Path) -> Result<MediaMetadata, AppError> {
     debug!("Running ffprobe via {:?} on {}", ffprobe_bin, file_path.display());
 
     let output = Command::new(&ffprobe_bin)
+        .no_window()
         .args([
             "-v",
             "quiet",

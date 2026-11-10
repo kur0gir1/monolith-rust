@@ -4,7 +4,7 @@ use std::process::Command;
 use tracing::{debug, info};
 
 use crate::error::AppError;
-use crate::metadata::find_ffmpeg;
+use crate::metadata::{find_ffmpeg, NoWindowCommandExt};
 
 /// Extracts embedded subtitle stream to WebVTT format on-the-fly.
 /// Command: `ffmpeg -y -v quiet -i <INPUT> -map 0:<SUB_INDEX> -f webvtt <OUTPUT_VTT>`
@@ -37,6 +37,7 @@ pub fn extract_webvtt_subtitles(
     let map_arg = format!("0:{}", sub_index);
 
     let status = Command::new(&ffmpeg)
+        .no_window()
         .args([
             "-y",
             "-v",

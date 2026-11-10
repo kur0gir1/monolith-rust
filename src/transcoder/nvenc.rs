@@ -2,7 +2,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use tracing::info;
 
-use crate::metadata::find_ffmpeg;
+use crate::metadata::{find_ffmpeg, NoWindowCommandExt};
 
 static NVENC_PROBE_CACHE: OnceLock<bool> = OnceLock::new();
 
@@ -12,6 +12,7 @@ pub fn probe_nvenc_available() -> bool {
     *NVENC_PROBE_CACHE.get_or_init(|| {
         let ffmpeg = find_ffmpeg();
         let status = Command::new(&ffmpeg)
+            .no_window()
             .args([
                 "-v",
                 "error",

@@ -121,6 +121,7 @@ export const App: React.FC = () => {
         {view === 'browser' ? (
           <MediaBrowser
             items={mediaItems}
+            rootDirectory={selectedDirectory}
             onSelectItem={handleSelectItem}
             onTriggerScan={() => handleSelectDirectory()}
             isScanning={isScanning}

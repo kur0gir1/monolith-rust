@@ -120,9 +120,13 @@ impl SessionManager {
             session_id, mode, audio_index
         );
 
-        let child = tokio::process::Command::new(&ffmpeg)
-            .args(&args)
-            .kill_on_drop(true)
+        let mut cmd = tokio::process::Command::new(&ffmpeg);
+        cmd.args(&args).kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(crate::metadata::CREATE_NO_WINDOW);
+        }
+        let child = cmd
             .spawn()
             .map_err(|e| AppError::ProcessError(format!("Failed to spawn FFmpeg: {}", e)))?;
 

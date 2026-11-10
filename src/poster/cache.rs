@@ -4,7 +4,7 @@ use std::process::Command;
 use tracing::{debug, info};
 
 use crate::error::AppError;
-use crate::metadata::find_ffmpeg;
+use crate::metadata::{find_ffmpeg, NoWindowCommandExt};
 
 /// Returns the local poster cache directory (%LOCALAPPDATA%\Monolith\cache\posters).
 pub fn get_poster_cache_dir() -> PathBuf {
@@ -67,6 +67,7 @@ pub fn extract_or_get_poster(media_path: &Path, file_hash: &str) -> Result<PathB
     // 1. Attempt embedded cover extraction
     // Try MKV attachment mapping (-map 0:m:filename:cover.jpg or -map 0:t:0)
     let mkv_status = Command::new(&ffmpeg)
+        .no_window()
         .args([
             "-y",
             "-v",
@@ -92,6 +93,7 @@ pub fn extract_or_get_poster(media_path: &Path, file_hash: &str) -> Result<PathB
 
     // Try MKV attachment index 0 (-map 0:t:0)
     let mkv_att_status = Command::new(&ffmpeg)
+        .no_window()
         .args([
             "-y",
             "-v",
@@ -117,6 +119,7 @@ pub fn extract_or_get_poster(media_path: &Path, file_hash: &str) -> Result<PathB
 
     // Try MP4 attached_pic / second video stream (-map 0:v:1)
     let mp4_status = Command::new(&ffmpeg)
+        .no_window()
         .args([
             "-y",
             "-v",
@@ -142,6 +145,7 @@ pub fn extract_or_get_poster(media_path: &Path, file_hash: &str) -> Result<PathB
 
     // Try general embedded cover (-an -vcodec copy -frames:v 1 -update 1 -f image2)
     let general_status = Command::new(&ffmpeg)
+        .no_window()
         .args([
             "-y",
             "-v",
@@ -171,6 +175,7 @@ pub fn extract_or_get_poster(media_path: &Path, file_hash: &str) -> Result<PathB
     // 2. Video Frame Thumbnail Fallback (Seek 10s or 2s if short video)
     for seek_time in ["00:00:10", "00:00:02", "00:00:01", "00:00:00"] {
         let frame_status = Command::new(&ffmpeg)
+            .no_window()
             .args([
                 "-y",
                 "-v",
