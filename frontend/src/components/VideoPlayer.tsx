@@ -55,10 +55,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
+          startFragPrefetch: true,
           maxBufferLength: 30,
           backBufferLength: 30,
           manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 5,
+          manifestLoadingMaxRetry: 6,
+          manifestLoadingRetryDelay: 300,
         });
         hlsRef.current = hls;
 

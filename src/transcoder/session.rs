@@ -62,6 +62,7 @@ impl SessionManager {
         media_id: &str,
         media_path: &Path,
         audio_index: u32,
+        video_codec: Option<&str>,
     ) -> Result<HlsStreamInfo, AppError> {
         let mut map = self.sessions.write().await;
 
@@ -99,8 +100,13 @@ impl SessionManager {
         fs::create_dir_all(&temp_dir)?;
 
         let playlist_path = temp_dir.join("index.m3u8");
-        let nvenc_available = probe_nvenc_available();
-        let mode = if nvenc_available {
+        let is_h264 = video_codec
+            .map(|c| c.eq_ignore_ascii_case("h264") || c.eq_ignore_ascii_case("avc1"))
+            .unwrap_or(false);
+        let mode = if is_h264 {
+            // Instant zero-reencode remux when source video is already H.264
+            TranscodeMode::DirectStream
+        } else if probe_nvenc_available() {
             TranscodeMode::NvencCuda
         } else {
             TranscodeMode::CpuLibx264
@@ -145,17 +151,17 @@ impl SessionManager {
         map.insert(media_id.to_string(), session);
         drop(map);
 
-        // Wait up to 3 seconds for the variant playlist to begin writing without holding the write lock
+        // Wait up to 8 seconds (polling every 25ms) for the first HLS segment and playlist to be ready
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(3) {
+        while start.elapsed() < Duration::from_secs(8) {
             if playlist_path.exists() {
-                if let Ok(meta) = fs::metadata(&playlist_path) {
-                    if meta.len() > 0 {
+                if let Ok(content) = fs::read_to_string(&playlist_path) {
+                    if content.contains(".ts") {
                         break;
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
         Ok(HlsStreamInfo {
@@ -176,9 +182,10 @@ impl SessionManager {
         media_id: &str,
         media_path: &Path,
         new_audio_index: u32,
+        video_codec: Option<&str>,
     ) -> Result<(), AppError> {
         let _ = self
-            .start_or_get_session(media_id, media_path, new_audio_index)
+            .start_or_get_session(media_id, media_path, new_audio_index, video_codec)
             .await?;
         Ok(())
     }

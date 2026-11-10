@@ -64,10 +64,11 @@ pub async fn get_variant_playlist(
 
     let audio_index = query.audio.unwrap_or(0);
     let media_path = PathBuf::from(&item.file_path);
+    let video_codec = item.metadata.as_ref().map(|m| m.video_codec.as_str());
 
     let _stream_info = state
         .transcode_sessions
-        .start_or_get_session(&id, &media_path, audio_index)
+        .start_or_get_session(&id, &media_path, audio_index, video_codec)
         .await?;
 
     let temp_dir = state
@@ -184,10 +185,11 @@ pub async fn switch_audio(
         .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
 
     let media_path = PathBuf::from(&item.file_path);
+    let video_codec = item.metadata.as_ref().map(|m| m.video_codec.as_str());
 
     state
         .transcode_sessions
-        .switch_audio_track(&id, &media_path, payload.audio_index)
+        .switch_audio_track(&id, &media_path, payload.audio_index, video_codec)
         .await?;
 
     Ok(Json(serde_json::json!({

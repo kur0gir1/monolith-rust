@@ -4,7 +4,7 @@ use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::metadata::probe_media_file;
 use crate::models::MediaItem;
-use crate::poster::extract_or_get_poster;
+use crate::poster::get_cached_poster_path;
 use crate::scanner::scan_directory as run_scan;
 
 /// Opens the native Windows folder picker dialog asynchronously on a blocking thread.
@@ -21,30 +21,49 @@ pub async fn pick_directory() -> Result<Option<String>, AppError> {
     Ok(picked.map(|p| p.to_string_lossy().to_string()))
 }
 
-/// Recursively scans the provided directory path, enriches metadata/posters, updates AppState, and returns items.
+/// Recursively scans the provided directory path, enriches metadata in parallel, updates AppState, and returns items.
 #[tauri::command]
 pub async fn scan_directory(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<MediaItem>, AppError> {
-    let items = tokio::task::spawn_blocking({
+    let scanned = tokio::task::spawn_blocking({
         let path = path.clone();
-        move || -> Result<Vec<MediaItem>, AppError> {
-            let mut scanned = run_scan(&path)?;
-            for item in &mut scanned {
+        move || run_scan(&path)
+    })
+    .await
+    .map_err(|e| AppError::JoinError(e.to_string()))??;
+
+    // Probe metadata concurrently across a bounded worker pool (up to 8 parallel ffprobe calls);
+    // Posters are extracted lazily on-demand by `/api/media/:id/poster` so scanning returns much faster.
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let mut handles = Vec::with_capacity(scanned.len());
+    for mut item in scanned {
+        let sem_clone = sem.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.ok();
+            tokio::task::spawn_blocking(move || {
                 let p = Path::new(&item.file_path);
                 if let Ok(meta) = probe_media_file(p) {
                     item.metadata = Some(meta);
                 }
-                if let Ok(poster) = extract_or_get_poster(p, &item.id) {
-                    item.poster_path = Some(poster.to_string_lossy().to_string());
+                let cached = get_cached_poster_path(&item.id);
+                if cached.exists() {
+                    item.poster_path = Some(cached.to_string_lossy().to_string());
                 }
-            }
-            Ok(scanned)
+                item
+            })
+            .await
+            .unwrap_or_else(|_| panic!("probe task panicked"))
+        }));
+    }
+
+    let mut items = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(item) = h.await {
+            items.push(item);
         }
-    })
-    .await
-    .map_err(|e| AppError::JoinError(e.to_string()))??;
+    }
 
     state.set_items(items.clone()).await;
     state.set_selected_directory(Some(path)).await;
