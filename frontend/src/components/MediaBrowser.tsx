@@ -325,7 +325,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
         </div>
 
         <div className="toolbar-controls-group">
-          <span style={{ fontSize: '0.875rem', fontWeight: 700 }}>[CODEC]:</span>
+          <span className="status-label">[CODEC]:</span>
           {['ALL', 'H264', 'HEVC', 'MKV', 'MP4'].map((codec) => (
             <button
               key={codec}
@@ -337,7 +337,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
             </button>
           ))}
 
-          <span style={{ fontSize: '0.875rem', fontWeight: 700, marginLeft: '4px' }}>[VIEW]:</span>
+          <span className="status-label" style={{ marginLeft: '4px' }}>[VIEW]:</span>
           <button
             type="button"
             className={`brutalist-btn sm ${viewMode === 'grid' ? 'active' : ''}`}

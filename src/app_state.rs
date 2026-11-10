@@ -7,7 +7,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::models::MediaItem;
+use crate::party::PartyManager;
 use crate::transcoder::SessionManager;
+use crate::tunnel::TunnelManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistedLibraryState {
@@ -29,6 +31,8 @@ pub struct AppState {
     pub catalog: Arc<RwLock<HashMap<String, MediaItem>>>,
     pub selected_directory: Arc<RwLock<Option<String>>>,
     pub transcode_sessions: SessionManager,
+    pub tunnel: TunnelManager,
+    pub party: PartyManager,
 }
 
 impl AppState {
@@ -38,6 +42,8 @@ impl AppState {
             catalog: Arc::new(RwLock::new(HashMap::new())),
             selected_directory: Arc::new(RwLock::new(None)),
             transcode_sessions: SessionManager::new(),
+            tunnel: TunnelManager::new(),
+            party: PartyManager::new(),
         }
     }
 
@@ -62,6 +68,8 @@ impl AppState {
                         catalog: Arc::new(RwLock::new(map)),
                         selected_directory: Arc::new(RwLock::new(persisted.selected_directory)),
                         transcode_sessions: SessionManager::new(),
+                        tunnel: TunnelManager::new(),
+                        party: PartyManager::new(),
                     };
                 }
             }

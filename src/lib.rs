@@ -2,11 +2,13 @@ pub mod app_state;
 pub mod error;
 pub mod metadata;
 pub mod models;
+pub mod party;
 pub mod poster;
 pub mod scanner;
 pub mod server;
 pub mod tauri_commands;
 pub mod transcoder;
+pub mod tunnel;
 
 use app_state::AppState;
 use tauri::Manager;

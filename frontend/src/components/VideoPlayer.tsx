@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
 import { MediaItem, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
-import { api } from '../api/client';
+import { api, getPeerId } from '../api/client';
 import { VideoProgressEntry } from '../utils/watchProgress';
 
 interface VideoPlayerProps {
@@ -84,6 +84,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Embedded overlay & drawer states
   const [controlsVisible, setControlsVisible] = useState<boolean>(true);
   const [activePopover, setActivePopover] = useState<'none' | 'tracks' | 'subSettings'>('none');
+  const [partySyncEnabled, setPartySyncEnabled] = useState<boolean>(true);
+  const [activePeers, setActivePeers] = useState<number>(1);
+  const lastAppliedSeqRef = useRef<number>(0);
 
   // Custom HUD transport state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -294,16 +297,80 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
+  const broadcastPartyUpdate = useCallback(
+    (playing: boolean, timeSec: number) => {
+      if (!partySyncEnabled) return;
+      api
+        .updatePartyState({
+          media_id: item.id,
+          media_title: item.file_name,
+          is_playing: playing,
+          current_time: timeSec,
+        })
+        .then((st) => {
+          lastAppliedSeqRef.current = st.event_seq;
+          setActivePeers(st.active_peers);
+        })
+        .catch(() => {});
+    },
+    [partySyncEnabled, item.id, item.file_name]
+  );
+
+  // Poll Watch Party state for shared-control playback synchronization
+  useEffect(() => {
+    if (!partySyncEnabled) return;
+    const myPeerId = getPeerId();
+
+    const syncInterval = window.setInterval(async () => {
+      try {
+        const party = await api.getPartyState();
+        setActivePeers(party.active_peers);
+
+        if (party.media_id !== item.id) return;
+        const video = videoRef.current;
+        if (!video) return;
+
+        const isNewRemoteEvent =
+          party.event_seq > lastAppliedSeqRef.current && party.updated_by !== myPeerId;
+
+        if (isNewRemoteEvent) {
+          lastAppliedSeqRef.current = party.event_seq;
+          if (Math.abs(video.currentTime - party.current_time) > 1.2) {
+            video.currentTime = party.current_time;
+            setCurrentTime(party.current_time);
+          }
+          if (party.is_playing && video.paused) {
+            video.play().catch(() => {});
+          } else if (!party.is_playing && !video.paused) {
+            video.pause();
+          }
+        } else if (party.is_playing && !video.paused) {
+          // Drift correction if a viewer falls >2.5s behind the room
+          if (Math.abs(video.currentTime - party.current_time) > 2.5) {
+            video.currentTime = party.current_time;
+            setCurrentTime(party.current_time);
+          }
+        }
+      } catch {
+        // ignore network hiccups
+      }
+    }, 1000);
+
+    return () => window.clearInterval(syncInterval);
+  }, [partySyncEnabled, item.id]);
+
   // Transport actions
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
       video.play().catch(console.error);
+      broadcastPartyUpdate(true, video.currentTime);
     } else {
       video.pause();
+      broadcastPartyUpdate(false, video.currentTime);
     }
-  }, []);
+  }, [broadcastPartyUpdate]);
 
   const seekBy = useCallback(
     (deltaSeconds: number) => {
@@ -314,16 +381,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.currentTime = next;
       setCurrentTime(next);
       resetControlsHideTimer();
+      broadcastPartyUpdate(!video.paused, next);
     },
-    [duration, resetControlsHideTimer]
+    [duration, resetControlsHideTimer, broadcastPartyUpdate]
   );
 
-  const seekTo = useCallback((targetSeconds: number) => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.currentTime = targetSeconds;
-    setCurrentTime(targetSeconds);
-  }, []);
+  const seekTo = useCallback(
+    (targetSeconds: number) => {
+      const video = videoRef.current;
+      if (!video) return;
+      video.currentTime = targetSeconds;
+      setCurrentTime(targetSeconds);
+      broadcastPartyUpdate(!video.paused, targetSeconds);
+    },
+    [broadcastPartyUpdate]
+  );
 
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
@@ -612,6 +684,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 [{Math.round(progressPercent)}% WATCHED]
               </span>
               <span className="badge">[{streamStatus}]</span>
+              <button
+                type="button"
+                className={`brutalist-btn sm ${partySyncEnabled ? 'active' : ''}`}
+                onClick={() => setPartySyncEnabled((v) => !v)}
+                title="Synchronize Play, Pause, and Seek with Watch Party viewers"
+              >
+                [PARTY SYNC: {partySyncEnabled ? `ON (${activePeers})` : 'OFF'}]
+              </button>
               <button
                 type="button"
                 className={`brutalist-btn sm ${activePopover === 'tracks' ? 'active' : ''}`}

@@ -1,4 +1,4 @@
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -11,9 +11,11 @@ use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::metadata::probe_media_file;
 use crate::models::MediaItem;
+use crate::party::{PartyState, PartyUpdateRequest};
 use crate::poster::extract_or_get_poster;
 use crate::scanner::scan_directory;
 use crate::transcoder::probe_nvenc_available;
+use crate::tunnel::{TunnelProvider, TunnelStatus};
 
 #[derive(Debug, Deserialize)]
 pub struct ScanRequest {
@@ -159,12 +161,99 @@ pub async fn get_status(State(state): State<AppState>) -> Json<serde_json::Value
         "CPU LIBX264".to_string()
     };
     let selected_directory = state.get_selected_directory().await;
+    let tunnel = state.tunnel.get_status().await;
 
     Json(serde_json::json!({
         "lan_ip": lan_ip,
         "port": 9000,
         "gpu_available": gpu_available,
         "transcoder": transcoder,
-        "selected_directory": selected_directory
+        "selected_directory": selected_directory,
+        "tunnel": tunnel
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TunnelStartRequest {
+    pub provider: Option<String>,
+}
+
+/// GET /api/tunnel
+pub async fn get_tunnel_status(State(state): State<AppState>) -> Json<TunnelStatus> {
+    Json(state.tunnel.get_status().await)
+}
+
+/// POST /api/tunnel/start
+pub async fn start_tunnel(
+    State(state): State<AppState>,
+    Json(payload): Json<TunnelStartRequest>,
+) -> Json<TunnelStatus> {
+    let provider = TunnelProvider::from_str_opt(payload.provider.as_deref());
+    let status = state.tunnel.start(provider, 9000).await;
+    Json(status)
+}
+
+/// POST /api/tunnel/stop
+pub async fn stop_tunnel(State(state): State<AppState>) -> Json<TunnelStatus> {
+    Json(state.tunnel.stop().await)
+}
+
+/// POST /api/tunnel/rotate
+pub async fn rotate_tunnel_token(State(state): State<AppState>) -> Json<TunnelStatus> {
+    Json(state.tunnel.rotate_token().await)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PartyQuery {
+    pub peer_id: Option<String>,
+}
+
+/// GET /api/party
+pub async fn get_party_state(
+    State(state): State<AppState>,
+    Query(query): Query<PartyQuery>,
+) -> Json<PartyState> {
+    Json(state.party.get_state(query.peer_id.as_deref()).await)
+}
+
+/// POST /api/party
+pub async fn update_party_state(
+    State(state): State<AppState>,
+    Json(payload): Json<PartyUpdateRequest>,
+) -> Json<PartyState> {
+    Json(state.party.update(payload).await)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenBrowserRequest {
+    pub url: String,
+}
+
+/// POST /api/open-browser
+pub async fn open_in_browser(
+    Json(payload): Json<OpenBrowserRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let url = payload.url.trim().to_string();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(AppError::InvalidPath(
+            "Only http:// and https:// URLs can be opened".to_string(),
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+
+    Ok(Json(serde_json::json!({ "opened": true, "url": url })))
 }

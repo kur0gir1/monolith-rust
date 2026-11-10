@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { MediaItem, ServerStatus } from './types/media';
-import { api } from './api/client';
+import { MediaItem, PartyState, ServerStatus } from './types/media';
+import { api, setInviteTokenManual } from './api/client';
 import { NoiseOverlay } from './components/NoiseOverlay';
 import { Header } from './components/Header';
 import { MediaBrowser } from './components/MediaBrowser';
@@ -20,6 +20,9 @@ export const App: React.FC = () => {
   const [isScanning, setIsScanning] = useState(false);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [watchProgress, setWatchProgress] = useState<WatchProgressMap>(loadWatchProgress);
+  const [partyState, setPartyState] = useState<PartyState | null>(null);
+  const [needsInviteAuth, setNeedsInviteAuth] = useState(false);
+  const [inviteInput, setInviteInput] = useState('');
 
   const handleProgressUpdate = useCallback(
     (mediaId: string, currentTime: number, duration: number) => {
@@ -33,8 +36,12 @@ export const App: React.FC = () => {
     try {
       const items = await api.getMediaItems();
       setMediaItems(items);
-    } catch {
-      // Backend may be starting up or empty
+      setNeedsInviteAuth(false);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED_INVITE') {
+        setNeedsInviteAuth(true);
+        return;
+      }
     }
 
     try {
@@ -55,14 +62,26 @@ export const App: React.FC = () => {
   useEffect(() => {
     loadData();
 
-    // Periodic telemetry ping every 10s
-    const interval = setInterval(() => {
-      api.getServerStatus()
+    // Periodic telemetry ping every 8s
+    const statusInterval = setInterval(() => {
+      api
+        .getServerStatus()
         .then((s) => setServerStatus(s))
         .catch(() => {});
-    }, 10000);
+    }, 8000);
 
-    return () => clearInterval(interval);
+    // Watch Party heartbeat & state sync every 1.2s
+    const partyInterval = setInterval(() => {
+      api
+        .getPartyState()
+        .then((p) => setPartyState(p))
+        .catch(() => {});
+    }, 1200);
+
+    return () => {
+      clearInterval(statusInterval);
+      clearInterval(partyInterval);
+    };
   }, [loadData]);
 
   // Handle directory selection and scan
@@ -86,11 +105,41 @@ export const App: React.FC = () => {
   const handleSelectItem = (item: MediaItem) => {
     setSelectedItem(item);
     setView('player');
+    api
+      .updatePartyState({
+        media_id: item.id,
+        media_title: item.file_name,
+        is_playing: true,
+        current_time: watchProgress[item.id]?.currentTime ?? 0,
+      })
+      .then((p) => setPartyState(p))
+      .catch(() => {});
+  };
+
+  const handleJoinPartyMedia = () => {
+    if (!partyState?.media_id) return;
+    const match = mediaItems.find((m) => m.id === partyState.media_id);
+    if (match) {
+      setSelectedItem(match);
+      setView('player');
+    }
   };
 
   const handleBackToBrowser = () => {
     setView('browser');
     setSelectedItem(null);
+  };
+
+  const handleInviteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    let token = inviteInput.trim();
+    if (token.includes('invite=')) {
+      const after = token.split('invite=')[1];
+      token = after.split('&')[0];
+    }
+    setInviteTokenManual(token);
+    setInviteInput('');
+    await loadData();
   };
 
   return (
@@ -104,53 +153,102 @@ export const App: React.FC = () => {
         selectedDirectory={selectedDirectory}
         onSelectDirectory={handleSelectDirectory}
         isScanning={isScanning}
+        partyState={partyState}
       />
 
       {/* Main View Area */}
       <main className="app-main">
-        {errorNotice && (
-          <div
-            style={{
-              border: '2px solid #FFFFFF',
-              background: '#000000',
-              padding: '12px 16px',
-              marginBottom: '16px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            }}
-          >
-            <span>[ERROR]: {errorNotice}</span>
-            <button
-              type="button"
-              className="brutalist-btn sm"
-              onClick={() => setErrorNotice(null)}
+        {needsInviteAuth ? (
+          <div className="empty-state">
+            <h2>[ENCRYPTED INVITE TOKEN REQUIRED]</h2>
+            <p className="modal-desc">
+              This Monolith stream is protected. Paste the invite link or token shared by the host
+              to join the Watch Party.
+            </p>
+            <form
+              onSubmit={handleInviteSubmit}
+              style={{ display: 'flex', gap: '8px', width: '100%', maxWidth: '420px' }}
             >
-              [DISMISS]
-            </button>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="PASTE INVITE LINK OR TOKEN..."
+                value={inviteInput}
+                onChange={(e) => setInviteInput(e.target.value)}
+                autoFocus
+              />
+              <button type="submit" className="brutalist-btn active">
+                [UNLOCK]
+              </button>
+            </form>
           </div>
-        )}
+        ) : (
+          <>
+            {errorNotice && (
+              <div className="error-banner">
+                <span>[ERROR]: {errorNotice}</span>
+                <button
+                  type="button"
+                  className="brutalist-btn sm"
+                  onClick={() => setErrorNotice(null)}
+                >
+                  [DISMISS]
+                </button>
+              </div>
+            )}
 
-        {view === 'browser' ? (
-          <MediaBrowser
-            items={mediaItems}
-            rootDirectory={selectedDirectory}
-            watchProgress={watchProgress}
-            onSelectItem={handleSelectItem}
-            onTriggerScan={() => handleSelectDirectory()}
-            isScanning={isScanning}
-          />
-        ) : selectedItem ? (
-          <VideoPlayer
-            item={selectedItem}
-            serverStatus={serverStatus}
-            initialProgress={watchProgress[selectedItem.id]}
-            onProgressUpdate={handleProgressUpdate}
-            onBack={handleBackToBrowser}
-          />
-        ) : null}
+            {/* Watch Party Live Banner when someone is watching a video */}
+            {view === 'browser' &&
+              partyState?.media_id &&
+              mediaItems.some((m) => m.id === partyState.media_id) && (
+                <div className="party-live-banner">
+                  <div>
+                    <span className="badge badge-inverted" style={{ marginRight: '10px' }}>
+                      [WATCH PARTY LIVE]
+                    </span>
+                    <strong>{partyState.media_title || 'SHARED STREAM'}</strong>
+                    <span style={{ opacity: 0.75, marginLeft: '10px' }}>
+                      ({partyState.is_playing ? 'PLAYING' : 'PAUSED'} //{' '}
+                      {Math.floor(partyState.current_time / 60)}:
+                      {Math.floor(partyState.current_time % 60)
+                        .toString()
+                        .padStart(2, '0')}
+                      )
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="brutalist-btn sm active"
+                    onClick={handleJoinPartyMedia}
+                  >
+                    [JOIN STREAM NOW ▶]
+                  </button>
+                </div>
+              )}
+
+            {view === 'browser' ? (
+              <MediaBrowser
+                items={mediaItems}
+                rootDirectory={selectedDirectory}
+                watchProgress={watchProgress}
+                onSelectItem={handleSelectItem}
+                onTriggerScan={() => handleSelectDirectory()}
+                isScanning={isScanning}
+              />
+            ) : selectedItem ? (
+              <VideoPlayer
+                item={selectedItem}
+                serverStatus={serverStatus}
+                initialProgress={watchProgress[selectedItem.id]}
+                onProgressUpdate={handleProgressUpdate}
+                onBack={handleBackToBrowser}
+              />
+            ) : null}
+          </>
+        )}
       </main>
     </div>
   );
 };
+
 export default App;

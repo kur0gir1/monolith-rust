@@ -85,10 +85,10 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         ) : (
           <div className="media-card-poster-fallback">
             <span className="poster-fallback-ascii">▶ // ❚❚</span>
-            <span style={{ fontSize: '0.9rem', fontWeight: 900 }}>
+            <span style={{ fontSize: '0.82rem', fontWeight: 700 }}>
               [{item.extension.toUpperCase()}]
             </span>
-            <span style={{ fontSize: '0.875rem', marginTop: '6px', opacity: 0.8 }}>
+            <span style={{ fontSize: '0.7rem', marginTop: '6px', opacity: 0.72 }}>
               {getFileSizeString()}
             </span>
           </div>
