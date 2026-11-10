@@ -33,10 +33,12 @@ pub struct AppState {
     pub transcode_sessions: SessionManager,
     pub tunnel: TunnelManager,
     pub party: PartyManager,
+    /// Only the real desktop app writes `library_state.json`; tests stay in-memory.
+    persist: bool,
 }
 
 impl AppState {
-    /// Creates a new in-memory AppState (used by unit/integration tests).
+    /// Creates a new in-memory AppState (used by unit/integration tests). Never touches disk.
     pub fn new() -> Self {
         Self {
             catalog: Arc::new(RwLock::new(HashMap::new())),
@@ -44,6 +46,7 @@ impl AppState {
             transcode_sessions: SessionManager::new(),
             tunnel: TunnelManager::new(),
             party: PartyManager::new(),
+            persist: false,
         }
     }
 
@@ -70,15 +73,22 @@ impl AppState {
                         transcode_sessions: SessionManager::new(),
                         tunnel: TunnelManager::new(),
                         party: PartyManager::new(),
+                        persist: true,
                     };
                 }
             }
         }
-        Self::new()
+        Self {
+            persist: true,
+            ..Self::new()
+        }
     }
 
     /// Saves the current root directory and catalog to `%LOCALAPPDATA%\Monolith\library_state.json`.
     pub async fn save_to_disk(&self) {
+        if !self.persist {
+            return;
+        }
         let selected_directory = self.get_selected_directory().await;
         let items = self.get_all_items().await;
         let persisted = PersistedLibraryState {

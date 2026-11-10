@@ -884,8 +884,215 @@ strong {
 /* Video Player */
 .player-container {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 16px;
   flex: 1;
+  width: 100%;
+}
+
+.player-main-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Netflix-style Skip Intro / Skip Outro Floating Pill */
+.skip-marker-btn {
+  position: absolute;
+  right: 28px;
+  bottom: 84px;
+  z-index: 45;
+  background: rgba(17, 19, 26, 0.92);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 6px;
+  padding: 10px 20px;
+  font-family: var(--font-display);
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.skip-marker-btn:hover {
+  background: #ffffff;
+  color: #090a0f;
+  border-color: #ffffff;
+  transform: translateY(-1px);
+}
+
+/* Timeline Chapter Markers */
+.timeline-chapter-marker {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+  z-index: 5;
+  border-radius: 1px;
+}
+
+.timeline-chapter-marker.marker-intro {
+  background: #818cf8;
+  box-shadow: 0 0 4px rgba(129, 140, 248, 0.7);
+}
+
+.timeline-chapter-marker.marker-outro {
+  background: #f87171;
+  box-shadow: 0 0 4px rgba(248, 113, 113, 0.7);
+}
+
+/* Playlist Sidebar (Right side of the player when an episode is running) */
+.player-playlist-panel {
+  width: 340px;
+  max-width: 35vw;
+  flex-shrink: 0;
+  background: #11131a;
+  border: 1px solid #272a38;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: 84dvh;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.playlist-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #272a38;
+  background: #181b24;
+}
+
+.playlist-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.playlist-header-label {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #f4f4f5;
+}
+
+.playlist-header-count {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: #71717a;
+}
+
+.playlist-close-btn {
+  padding: 2px 8px;
+  line-height: 1;
+}
+
+.playlist-panel-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px;
+  gap: 4px;
+}
+
+.playlist-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+
+.playlist-row:hover {
+  background: #181b24;
+  border-color: #272a38;
+}
+
+.playlist-row.active {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.playlist-row-index {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #71717a;
+  min-width: 22px;
+  text-align: center;
+}
+
+.playlist-row.active .playlist-row-index {
+  color: #818cf8;
+}
+
+.playlist-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.playlist-row-title {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #f4f4f5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-row.active .playlist-row-title {
+  color: #818cf8;
+}
+
+.playlist-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: #71717a;
+}
+
+.playlist-watched-tag {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .player-container {
+    flex-direction: column;
+  }
+  .player-playlist-panel {
+    width: 100%;
+    max-width: 100%;
+    max-height: 280px;
+  }
 }
 
 .player-header-left {

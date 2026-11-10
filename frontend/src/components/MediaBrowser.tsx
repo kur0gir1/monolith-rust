@@ -18,6 +18,24 @@ const naturalCollator = new Intl.Collator(undefined, {
   sensitivity: 'base',
 });
 
+const IGNORED_FOLDER_SEGMENTS = new Set([
+  'tests',
+  'test',
+  'fixtures',
+  'target',
+  'node_modules',
+  '.git',
+  '.cache',
+  'dist',
+  'build',
+]);
+
+function isIgnoredPath(relPath: string): boolean {
+  if (!relPath) return false;
+  const parts = relPath.toLowerCase().split(/[\\/]/);
+  return parts.some((p) => IGNORED_FOLDER_SEGMENTS.has(p) || p.startsWith('.'));
+}
+
 function normalizeSlashes(p: string): string {
   return p
     .replace(/^\\\\\?\\/, '')
@@ -159,7 +177,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
     >();
     for (const item of items) {
       const rel = getRelativeFolderPath(item.file_path, effectiveRoot);
-      if (!rel) continue;
+      if (!rel || isIgnoredPath(rel)) continue;
       const parts = rel.split('/');
       for (let i = 0; i < parts.length; i++) {
         const subPath = parts.slice(0, i + 1).join('/');
@@ -189,6 +207,9 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
   // Filter items by codec and search query
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
+      const rel = getRelativeFolderPath(item.file_path, effectiveRoot);
+      if (isIgnoredPath(rel)) return false;
+
       const matchesSearch = item.file_name
         .toLowerCase()
         .includes(searchQuery.toLowerCase().trim());

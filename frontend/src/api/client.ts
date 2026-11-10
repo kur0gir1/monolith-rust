@@ -1,4 +1,4 @@
-import { MediaItem, PartyState, ServerStatus, TunnelStatus } from '../types/media';
+import { ChapterMarker, MediaItem, PartyState, ServerStatus, TunnelStatus } from '../types/media';
 
 const INVITE_STORAGE_KEY = 'monolith_invite_token_v1';
 const PEER_ID_STORAGE_KEY = 'monolith_peer_id_v1';
@@ -223,6 +223,15 @@ export class ApiClient {
     return appendInviteParam(
       `${this.baseUrl}/api/stream/${encodeURIComponent(id)}/master.m3u8${query}`
     );
+  }
+
+  async getChapters(id: string): Promise<ChapterMarker[]> {
+    const res = await fetch(
+      appendInviteParam(`${this.baseUrl}/api/media/${encodeURIComponent(id)}/chapters`),
+      { headers: buildAuthHeaders() }
+    );
+    if (!res.ok) return [];
+    return res.json();
   }
 
   getSubtitleUrl(id: string, subIndex: number): string {

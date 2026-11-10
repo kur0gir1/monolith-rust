@@ -17,6 +17,13 @@ export interface SubtitleTrack {
   is_bitmap: boolean;
 }
 
+export interface ChapterMarker {
+  start: number;
+  end: number;
+  title?: string | null;
+  kind?: 'intro' | 'outro' | null;
+}
+
 export interface MediaMetadata {
   duration_seconds: number;
   width: number;

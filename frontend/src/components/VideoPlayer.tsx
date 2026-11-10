@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import Hls from 'hls.js';
-import { MediaItem, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
+import { ChapterMarker, MediaItem, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
 import { api, getPeerId } from '../api/client';
-import { VideoProgressEntry } from '../utils/watchProgress';
+import { VideoProgressEntry, WatchProgressMap } from '../utils/watchProgress';
 
 interface VideoPlayerProps {
   item: MediaItem;
@@ -10,7 +10,13 @@ interface VideoPlayerProps {
   initialProgress?: VideoProgressEntry;
   onProgressUpdate?: (mediaId: string, currentTime: number, duration: number) => void;
   onBack: () => void;
+  /** Episodes in the same folder (natural order). Sidebar shows when there is more than one. */
+  playlist?: MediaItem[];
+  watchProgress?: WatchProgressMap;
+  onSelectItem?: (item: MediaItem) => void;
 }
+
+const AUTO_NEXT_STORAGE_KEY = 'monolith_auto_next_v1';
 
 interface SubtitleSettings {
   fontSize: number; // rem (e.g. 1.0 to 2.4)
@@ -61,7 +67,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   initialProgress,
   onProgressUpdate,
   onBack,
+  playlist = [],
+  watchProgress = {},
+  onSelectItem,
 }) => {
+  const currentIndex = playlist.findIndex((p) => p.id === item.id);
+  const nextItem = currentIndex >= 0 ? playlist[currentIndex + 1] ?? null : null;
+  const showPlaylist = playlist.length > 1;
+  const [chapters, setChapters] = useState<ChapterMarker[]>([]);
+  const [playlistOpen, setPlaylistOpen] = useState<boolean>(true);
+  const [autoNext, setAutoNext] = useState<boolean>(
+    () => localStorage.getItem(AUTO_NEXT_STORAGE_KEY) !== 'false'
+  );
+  const autoNextTriggeredRef = useRef<boolean>(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -246,10 +264,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
-    const onPlay = () => setIsPlaying(true);
+    const onPlay = () => {
+      autoNextTriggeredRef.current = false;
+      setIsPlaying(true);
+    };
     const onPause = () => {
       setIsPlaying(false);
       setControlsVisible(true);
+    };
+    const onEnded = () => {
+      if (autoNext && nextItem && onSelectItem && !autoNextTriggeredRef.current) {
+        autoNextTriggeredRef.current = true;
+        onSelectItem(nextItem);
+      }
     };
     const onTimeUpdate = () => {
       const cur = video.currentTime;
@@ -262,6 +289,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const effDur = Math.max(metaDur, vidDur);
       if (effDur > 0 && cur > 1) {
         onProgressUpdate?.(item.id, cur, effDur);
+      }
+      if (
+        autoNext &&
+        nextItem &&
+        onSelectItem &&
+        effDur > 10 &&
+        cur >= effDur - 0.7 &&
+        !autoNextTriggeredRef.current
+      ) {
+        autoNextTriggeredRef.current = true;
+        onSelectItem(nextItem);
       }
     };
     const onDurationChange = () => {
@@ -276,6 +314,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     video.addEventListener('play', onPlay);
     video.addEventListener('pause', onPause);
+    video.addEventListener('ended', onEnded);
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('durationchange', onDurationChange);
     video.addEventListener('volumechange', onVolumeChange);
@@ -283,6 +322,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return () => {
       video.removeEventListener('play', onPlay);
       video.removeEventListener('pause', onPause);
+      video.removeEventListener('ended', onEnded);
       video.removeEventListener('timeupdate', onTimeUpdate);
       video.removeEventListener('durationchange', onDurationChange);
       video.removeEventListener('volumechange', onVolumeChange);
@@ -422,6 +462,63 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     },
     [broadcastPartyUpdate]
   );
+
+  // Fetch chapters for the current media item
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getChapters(item.id)
+      .then((chs) => {
+        if (!cancelled) setChapters(chs);
+      })
+      .catch((err) => console.warn('Failed to load chapters:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [item.id]);
+
+  // Find active chapter marker (if any)
+  const activeChapter = useMemo(() => {
+    return chapters.find(
+      (c) => currentTime >= c.start && currentTime < c.end
+    );
+  }, [chapters, currentTime]);
+
+  // Determine Netflix-style skip action (Intro, Outro, or Next Episode)
+  const activeSkip = useMemo(() => {
+    if (activeChapter?.kind === 'intro') {
+      return {
+        label: 'SKIP INTRO ⏭',
+        targetTime: activeChapter.end + 0.1,
+        isNext: false,
+      };
+    }
+    if (activeChapter?.kind === 'outro') {
+      return {
+        label: nextItem ? 'NEXT EPISODE ▶' : 'SKIP OUTRO ⏭',
+        targetTime: activeChapter.end + 0.1,
+        isNext: Boolean(nextItem),
+      };
+    }
+    // Also if in the last 45 seconds of an episode and nextItem exists
+    if (nextItem && duration > 90 && currentTime >= duration - 45) {
+      return {
+        label: 'NEXT EPISODE ▶',
+        targetTime: duration,
+        isNext: true,
+      };
+    }
+    return null;
+  }, [activeChapter, currentTime, duration, nextItem]);
+
+  const handleSkipAction = useCallback(() => {
+    if (!activeSkip) return;
+    if (activeSkip.isNext && nextItem && onSelectItem) {
+      onSelectItem(nextItem);
+    } else {
+      seekTo(activeSkip.targetTime);
+    }
+  }, [activeSkip, nextItem, onSelectItem, seekTo]);
 
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
@@ -639,114 +736,155 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const showOverlay = controlsVisible || !isPlaying || activePopover !== 'none';
 
   return (
-    <div className="player-container">
-      {/* Unified Embedded Video Stage (Everything overlaid on the video canvas, auto-hiding on inactivity) */}
-      <div
-        ref={stageRef}
-        className={`player-stage embedded-stage ${isFullscreen ? 'is-fullscreen' : ''} ${
-          showOverlay ? 'controls-visible' : 'controls-hidden'
-        }`}
-        onMouseMove={resetControlsHideTimer}
-        onMouseEnter={resetControlsHideTimer}
-        onTouchStart={resetControlsHideTimer}
-      >
+    <div className={`player-container ${showPlaylist && playlistOpen ? 'with-playlist' : ''}`}>
+      <div className="player-main-pane">
+        {/* Unified Embedded Video Stage (Everything overlaid on the video canvas, auto-hiding on inactivity) */}
         <div
-          className="player-video-wrapper"
-          onClick={() => {
-            if (activePopover !== 'none') {
-              setActivePopover('none');
-            } else {
-              togglePlay();
-            }
-          }}
-          onDoubleClick={toggleFullscreen}
+          ref={stageRef}
+          className={`player-stage embedded-stage ${isFullscreen ? 'is-fullscreen' : ''} ${
+            showOverlay ? 'controls-visible' : 'controls-hidden'
+          }`}
+          onMouseMove={resetControlsHideTimer}
+          onMouseEnter={resetControlsHideTimer}
+          onTouchStart={resetControlsHideTimer}
         >
-          <video
-            ref={videoRef}
-            className="player-video-element"
-            playsInline
-            autoPlay
-          />
+          <div
+            className="player-video-wrapper"
+            onClick={() => {
+              if (activePopover !== 'none') {
+                setActivePopover('none');
+              } else {
+                togglePlay();
+              }
+            }}
+            onDoubleClick={toggleFullscreen}
+          >
+            <video
+              ref={videoRef}
+              className="player-video-element"
+              playsInline
+              autoPlay
+            />
 
-          {/* Customizable Subtitle Overlay */}
-          {activeCueText && (
-            <div
-              className="custom-subtitle-overlay"
-              style={{
-                bottom: `${subSettings.bottomOffset}%`,
-              }}
-            >
-              <span
-                className="custom-subtitle-box"
+            {/* Netflix-style Skip Intro / Skip Credits / Next Episode floating button */}
+            {activeSkip && (
+              <button
+                type="button"
+                className="skip-marker-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleSkipAction();
+                }}
+                title={activeSkip.label}
+              >
+                {activeSkip.label}
+              </button>
+            )}
+
+            {/* Customizable Subtitle Overlay */}
+            {activeCueText && (
+              <div
+                className="custom-subtitle-overlay"
                 style={{
-                  fontSize: `${subSettings.fontSize}rem`,
-                  color: subSettings.textColor,
-                  backgroundColor: `rgba(0, 0, 0, ${subSettings.bgOpacity})`,
-                  textShadow: subSettings.outline
-                    ? '-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 0 6px #000'
-                    : 'none',
+                  bottom: `${subSettings.bottomOffset}%`,
                 }}
               >
-                {activeCueText}
-              </span>
-            </div>
-          )}
-
-          {/* Embedded Top Overlay Bar (auto-hides with controls) */}
-          <div
-            className={`embedded-top-bar ${showOverlay ? 'visible' : ''}`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="player-header-left">
-              <button type="button" className="brutalist-btn sm" onClick={onBack}>
-                [&lt; BACK]
-              </button>
-              <div className="player-title" title={item.file_name}>
-                {item.file_name}
+                <span
+                  className="custom-subtitle-box"
+                  style={{
+                    fontSize: `${subSettings.fontSize}rem`,
+                    color: subSettings.textColor,
+                    backgroundColor: `rgba(0, 0, 0, ${subSettings.bgOpacity})`,
+                    textShadow: subSettings.outline
+                      ? '-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 0 6px #000'
+                      : 'none',
+                  }}
+                >
+                  {activeCueText}
+                </span>
               </div>
-            </div>
-            <div className="player-header-badges">
-              <span className="badge badge-inverted">
-                [{Math.round(progressPercent)}% WATCHED]
-              </span>
-              <span className="badge">[{streamStatus}]</span>
-              <button
-                type="button"
-                className={`brutalist-btn sm ${partySyncEnabled ? 'active' : ''}`}
-                onClick={() => setPartySyncEnabled((v) => !v)}
-                title="Synchronize Play, Pause, and Seek with Watch Party viewers"
-              >
-                [PARTY SYNC: {partySyncEnabled ? `ON (${activePeers})` : 'OFF'}]
-              </button>
-              {partySyncEnabled && (
+            )}
+
+            {/* Embedded Top Overlay Bar (auto-hides with controls) */}
+            <div
+              className={`embedded-top-bar ${showOverlay ? 'visible' : ''}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="player-header-left">
+                <button type="button" className="brutalist-btn sm" onClick={onBack}>
+                  [&lt; BACK]
+                </button>
+                <div className="player-title" title={item.file_name}>
+                  {item.file_name}
+                </div>
+              </div>
+              <div className="player-header-badges">
+                <span className="badge badge-inverted">
+                  [{Math.round(progressPercent)}% WATCHED]
+                </span>
+                <span className="badge">[{streamStatus}]</span>
                 <button
                   type="button"
-                  className="brutalist-btn sm"
-                  onClick={handleRefreshParty}
-                  disabled={isSyncingParty}
-                  title="Manually poll and align playback with Watch Party peers"
+                  className={`brutalist-btn sm ${partySyncEnabled ? 'active' : ''}`}
+                  onClick={() => setPartySyncEnabled((v) => !v)}
+                  title="Synchronize Play, Pause, and Seek with Watch Party viewers"
                 >
-                  {isSyncingParty ? '[SYNCING...]' : '[REFRESH SYNC ⟳]'}
+                  [PARTY SYNC: {partySyncEnabled ? `ON (${activePeers})` : 'OFF'}]
                 </button>
-              )}
-              <button
-                type="button"
-                className={`brutalist-btn sm ${activePopover === 'tracks' ? 'active' : ''}`}
-                onClick={() =>
-                  setActivePopover((p) => (p === 'tracks' ? 'none' : 'tracks'))
-                }
-              >
-                [AUDIO / SUBS]
-              </button>
-              <button
-                type="button"
-                className={`brutalist-btn sm ${activePopover === 'subSettings' ? 'active' : ''}`}
-                onClick={() =>
-                  setActivePopover((p) => (p === 'subSettings' ? 'none' : 'subSettings'))
-                }
-              >
-                [SUB SETTINGS]
-              </button>
+                {partySyncEnabled && (
+                  <button
+                    type="button"
+                    className="brutalist-btn sm"
+                    onClick={handleRefreshParty}
+                    disabled={isSyncingParty}
+                    title="Manually poll and align playback with Watch Party peers"
+                  >
+                    {isSyncingParty ? '[SYNCING...]' : '[REFRESH SYNC ⟳]'}
+                  </button>
+                )}
+                {showPlaylist && (
+                  <>
+                    <button
+                      type="button"
+                      className={`brutalist-btn sm ${autoNext ? 'active' : ''}`}
+                      onClick={() => {
+                        const nextVal = !autoNext;
+                        setAutoNext(nextVal);
+                        localStorage.setItem(AUTO_NEXT_STORAGE_KEY, String(nextVal));
+                      }}
+                      title="Automatically play the next episode when current completes"
+                    >
+                      [AUTO-NEXT: {autoNext ? 'ON' : 'OFF'}]
+                    </button>
+                    <button
+                      type="button"
+                      className={`brutalist-btn sm ${playlistOpen ? 'active' : ''}`}
+                      onClick={() => setPlaylistOpen((v) => !v)}
+                      title="Toggle Playlist Sidebar"
+                    >
+                      [EPISODES ({currentIndex + 1}/{playlist.length})]
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className={`brutalist-btn sm ${activePopover === 'tracks' ? 'active' : ''}`}
+                  onClick={() =>
+                    setActivePopover((p) => (p === 'tracks' ? 'none' : 'tracks'))
+                  }
+                >
+                  [AUDIO / SUBS]
+                </button>
+                <button
+                  type="button"
+                  className={`brutalist-btn sm ${activePopover === 'subSettings' ? 'active' : ''}`}
+                  onClick={() =>
+                    setActivePopover((p) => (p === 'subSettings' ? 'none' : 'subSettings'))
+                  }
+                >
+                  [SUB SETTINGS]
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1060,6 +1198,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   [{formatTime(hoverTime.time)}]
                 </div>
               )}
+              {effectiveDuration > 0 &&
+                chapters.map((ch, idx) => {
+                  const leftPct = (ch.start / effectiveDuration) * 100;
+                  return (
+                    <div
+                      key={idx}
+                      className={`timeline-chapter-marker ${ch.kind ? `marker-${ch.kind}` : ''}`}
+                      style={{ left: `${leftPct}%` }}
+                      title={`${ch.title || 'Chapter'} (${formatTime(ch.start)} - ${formatTime(ch.end)})`}
+                    />
+                  );
+                })}
               <div className="hud-timeline-buffer" style={{ width: `${bufferPercent}%` }} />
               <input
                 type="range"
@@ -1214,6 +1364,70 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Playlist sidebar on the right side of the player when an episode is running */}
+      {showPlaylist && playlistOpen && (
+        <aside className="player-playlist-panel" aria-label="Episode Playlist">
+          <div className="playlist-panel-header">
+            <div className="playlist-header-title">
+              <span className="playlist-header-label">PLAYLIST</span>
+              <span className="playlist-header-count">
+                {playlist.length} EPISODES
+              </span>
+            </div>
+            <button
+              type="button"
+              className="brutalist-btn sm playlist-close-btn"
+              onClick={() => setPlaylistOpen(false)}
+              title="Close playlist panel"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="playlist-panel-list">
+            {playlist.map((ep, idx) => {
+              const isCurrent = ep.id === item.id;
+              const epProgress = watchProgress[ep.id];
+              const pct = epProgress?.percent ?? 0;
+
+              return (
+                <div
+                  key={ep.id}
+                  className={`playlist-row ${isCurrent ? 'active' : ''}`}
+                  onClick={() => onSelectItem && onSelectItem(ep)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSelectItem && onSelectItem(ep);
+                    }
+                  }}
+                >
+                  <div className="playlist-row-index">
+                    {isCurrent ? '▶' : `${idx + 1}`.padStart(2, '0')}
+                  </div>
+                  <div className="playlist-row-info">
+                    <div className="playlist-row-title" title={ep.file_name}>
+                      {ep.file_name}
+                    </div>
+                    <div className="playlist-row-meta">
+                      {ep.metadata?.duration_seconds ? (
+                        <span>{formatTime(ep.metadata.duration_seconds)}</span>
+                      ) : null}
+                      {pct > 0 && (
+                        <span className="playlist-watched-tag">
+                          {pct >= 90 ? 'WATCHED' : `${pct}%`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </aside>
+      )}
     </div>
   );
 };

@@ -13,7 +13,8 @@ use tracing::info;
 use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::server::handlers::{
-    get_media_by_id, get_media_index, get_party_state, get_poster, get_status, get_tunnel_status,
+    get_media_by_id, get_media_chapters, get_media_index, get_party_state, get_poster, get_status,
+    get_tunnel_status,
     kill_tunnel, leave_party, open_in_browser, reset_party, rotate_tunnel_token, start_tunnel,
     stop_tunnel, trigger_scan, update_party_state,
 };
@@ -182,6 +183,7 @@ pub fn create_router(state: AppState) -> Router {
     let api_routes = Router::new()
         .route("/media", get(get_media_index))
         .route("/media/:id", get(get_media_by_id))
+        .route("/media/:id/chapters", get(get_media_chapters))
         .route("/media/:id/poster", get(get_poster))
         .route("/scan", post(trigger_scan))
         .route("/stream/:id/master.m3u8", get(get_master_playlist))

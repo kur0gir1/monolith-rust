@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, Suspense, lazy } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, Suspense, lazy } from 'react';
 import { MediaItem, PartyState, ServerStatus } from './types/media';
 import { api, setInviteTokenManual } from './api/client';
 import { NoiseOverlay } from './components/NoiseOverlay';
@@ -143,6 +143,17 @@ export const App: React.FC = () => {
     setSelectedItem(null);
   };
 
+  // Episodes = videos in the same folder as the one playing, in natural order (E2 before E10).
+  const playlist = useMemo(() => {
+    if (!selectedItem) return [];
+    const folderOf = (p: string) => p.replace(/[\\/][^\\/]*$/, '').toLowerCase();
+    const folder = folderOf(selectedItem.file_path);
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    return mediaItems
+      .filter((m) => folderOf(m.file_path) === folder)
+      .sort((a, b) => collator.compare(a.file_name, b.file_name));
+  }, [mediaItems, selectedItem]);
+
   const handleInviteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     let token = inviteInput.trim();
@@ -272,11 +283,15 @@ export const App: React.FC = () => {
                 }
               >
                 <VideoPlayer
+                  key={selectedItem.id}
                   item={selectedItem}
                   serverStatus={serverStatus}
                   initialProgress={watchProgress[selectedItem.id]}
                   onProgressUpdate={handleProgressUpdate}
                   onBack={handleBackToBrowser}
+                  playlist={playlist}
+                  watchProgress={watchProgress}
+                  onSelectItem={handleSelectItem}
                 />
               </Suspense>
             ) : null}

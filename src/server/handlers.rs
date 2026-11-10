@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::app_state::AppState;
 use crate::error::AppError;
-use crate::metadata::probe_media_file;
+use crate::metadata::{probe_chapters, probe_media_file, ChapterMarker};
 use crate::models::MediaItem;
 use crate::party::{PartyState, PartyUpdateRequest};
 use crate::poster::extract_or_get_poster;
@@ -38,6 +38,22 @@ pub async fn get_media_by_id(
         .await
         .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
     Ok(Json(item))
+}
+
+/// GET /api/media/:id/chapters — chapter markers with intro/outro classification for skip buttons.
+pub async fn get_media_chapters(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<ChapterMarker>>, AppError> {
+    let item = state
+        .get_item(&id)
+        .await
+        .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
+    let path = PathBuf::from(item.file_path);
+    let chapters = tokio::task::spawn_blocking(move || probe_chapters(&path))
+        .await
+        .map_err(|e| AppError::JoinError(e.to_string()))??;
+    Ok(Json(chapters))
 }
 
 /// GET /api/media/:id/poster

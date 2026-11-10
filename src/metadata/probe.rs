@@ -335,3 +335,120 @@ pub fn parse_metadata_json(json: &serde_json::Value) -> Result<MediaMetadata, Ap
         subtitle_tracks,
     })
 }
+
+/// A chapter marker read from the container. `kind` is `"intro"` / `"outro"` when the title says so.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ChapterMarker {
+    pub start: f64,
+    pub end: f64,
+    pub title: Option<String>,
+    pub kind: Option<&'static str>,
+}
+
+/// Classifies a chapter title as a skippable intro or outro. Untitled/scene chapters return `None`.
+pub fn classify_chapter_title(title: &str) -> Option<&'static str> {
+    let lower = title.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has = |words: &[&str]| tokens.iter().any(|t| words.contains(t));
+
+    // Intro first so "Opening Credits" is an intro, not an outro.
+    if has(&["intro", "opening", "op", "op1", "op2", "recap", "prologue"])
+        || lower.contains("previously on")
+        || lower.contains("title sequence")
+        || lower.contains("theme song")
+    {
+        return Some("intro");
+    }
+    if has(&["credits", "ending", "outro", "ed", "ed1", "ed2", "preview", "endcredits"]) {
+        return Some("outro");
+    }
+    None
+}
+
+/// Parses `ffprobe -show_chapters` JSON into chapter markers.
+pub fn parse_chapters_json(json: &serde_json::Value) -> Vec<ChapterMarker> {
+    let num = |v: Option<&serde_json::Value>| {
+        v.and_then(|x| x.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.as_f64()))
+    };
+    json.get("chapters")
+        .and_then(|c| c.as_array())
+        .map(|chapters| {
+            chapters
+                .iter()
+                .filter_map(|ch| {
+                    let start = num(ch.get("start_time"))?;
+                    let end = num(ch.get("end_time"))?;
+                    if end <= start {
+                        return None;
+                    }
+                    let title = ch
+                        .get("tags")
+                        .and_then(|t| t.get("title"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let kind = title.as_deref().and_then(classify_chapter_title);
+                    Some(ChapterMarker { start, end, title, kind })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reads chapter markers from a media file (container header only, fast).
+pub fn probe_chapters(file_path: &Path) -> Result<Vec<ChapterMarker>, AppError> {
+    let path_str = file_path.to_str().ok_or_else(|| {
+        AppError::InvalidPath(format!("Path contains invalid UTF-8: {}", file_path.display()))
+    })?;
+    let output = Command::new(find_ffprobe())
+        .no_window()
+        .args(["-v", "quiet", "-print_format", "json", "-show_chapters", path_str])
+        .output()
+        .map_err(|e| AppError::ProcessError(format!("Failed to spawn ffprobe: {}", e)))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(parse_chapters_json(&json))
+}
+
+#[cfg(test)]
+mod chapter_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_intro_and_outro_titles() {
+        assert_eq!(classify_chapter_title("Opening"), Some("intro"));
+        assert_eq!(classify_chapter_title("OP"), Some("intro"));
+        assert_eq!(classify_chapter_title("Opening Credits"), Some("intro"));
+        assert_eq!(classify_chapter_title("Previously on..."), Some("intro"));
+        assert_eq!(classify_chapter_title("Credits"), Some("outro"));
+        assert_eq!(classify_chapter_title("End Credits"), Some("outro"));
+        assert_eq!(classify_chapter_title("ED"), Some("outro"));
+        assert_eq!(classify_chapter_title("Part 01"), None);
+        assert_eq!(classify_chapter_title("Chapter 3"), None);
+        // "op"/"ed" must be whole tokens, not substrings
+        assert_eq!(classify_chapter_title("Development"), None);
+        assert_eq!(classify_chapter_title("Operation"), None);
+    }
+
+    #[test]
+    fn parses_ffprobe_chapter_json() {
+        let json = serde_json::json!({ "chapters": [
+            { "start_time": "0.000000", "end_time": "1516.500000", "tags": { "title": "Part 01" } },
+            { "start_time": "1516.500000", "end_time": "1708.100000", "tags": { "title": "Credits" } },
+            { "start_time": "1708.1", "end_time": "1708.1" },
+            { "start_time": "10.0", "end_time": "20.0" }
+        ]});
+        let ch = parse_chapters_json(&json);
+        assert_eq!(ch.len(), 3); // zero-length chapter dropped
+        assert_eq!(ch[0].kind, None);
+        assert_eq!(ch[1].kind, Some("outro"));
+        assert_eq!(ch[1].start, 1516.5);
+        assert_eq!(ch[2].title, None);
+        assert!(parse_chapters_json(&serde_json::json!({})).is_empty());
+    }
+}
