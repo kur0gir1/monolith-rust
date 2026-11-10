@@ -9,6 +9,36 @@ interface VideoPlayerProps {
   onBack: () => void;
 }
 
+interface SubtitleSettings {
+  fontSize: number; // rem (e.g. 1.0 to 2.4)
+  textColor: string; // '#FFFFFF' | '#FFFF00' | '#00FFFF' | '#00FF66'
+  bgOpacity: number; // 0 to 1
+  bottomOffset: number; // % from bottom (e.g. 8 to 28)
+  outline: boolean;
+}
+
+const DEFAULT_SUB_SETTINGS: SubtitleSettings = {
+  fontSize: 1.35,
+  textColor: '#FFFFFF',
+  bgOpacity: 0.75,
+  bottomOffset: 12,
+  outline: true,
+};
+
+const SUB_SETTINGS_STORAGE_KEY = 'monolith_subtitle_settings_v1';
+
+function loadSubtitleSettings(): SubtitleSettings {
+  try {
+    const raw = localStorage.getItem(SUB_SETTINGS_STORAGE_KEY);
+    if (raw) {
+      return { ...DEFAULT_SUB_SETTINGS, ...JSON.parse(raw) };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_SUB_SETTINGS;
+}
+
 function formatTime(secs: number): string {
   if (!Number.isFinite(secs) || secs < 0) return '00:00';
   const total = Math.floor(secs);
@@ -25,13 +55,13 @@ function formatTime(secs: number): string {
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   item,
-  serverStatus,
   onBack,
 }) => {
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const seekBarRef = useRef<HTMLDivElement>(null);
+  const hideTimerRef = useRef<number | null>(null);
 
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number>(() => {
     return item.metadata?.audio_tracks?.[0]?.index ?? 0;
@@ -40,6 +70,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [streamStatus, setStreamStatus] = useState<string>('CONNECTING');
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [isSwitchingAudio, setIsSwitchingAudio] = useState(false);
+
+  // Embedded overlay & drawer states
+  const [controlsVisible, setControlsVisible] = useState<boolean>(true);
+  const [activePopover, setActivePopover] = useState<'none' | 'tracks' | 'subSettings'>('none');
 
   // Custom HUD transport state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -52,14 +86,47 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [hoverTime, setHoverTime] = useState<{ time: number; percent: number } | null>(null);
 
+  // Custom rendered subtitle text & user-customizable settings
+  const [activeCueText, setActiveCueText] = useState<string>('');
+  const [subSettings, setSubSettings] = useState<SubtitleSettings>(loadSubtitleSettings);
+
+  const updateSubSettings = (patch: Partial<SubtitleSettings>) => {
+    setSubSettings((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem(SUB_SETTINGS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
   const audioTracks: AudioTrack[] = item.metadata?.audio_tracks ?? [];
   const subtitleTracks: SubtitleTrack[] = item.metadata?.subtitle_tracks ?? [];
 
-  const transcoderBadge = serverStatus?.transcoder
-    ? `[TRANSCODE: ${serverStatus.transcoder.toUpperCase()}]`
-    : serverStatus?.gpu_available
-    ? '[TRANSCODE: NVENC CUDA]'
-    : '[TRANSCODE: CPU LIBX264]';
+  // Auto-hide embedded controls after 2.5s of mouse inactivity during playback
+  const resetControlsHideTimer = useCallback(() => {
+    setControlsVisible(true);
+    if (hideTimerRef.current !== null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+    if (isPlaying && activePopover === 'none') {
+      hideTimerRef.current = window.setTimeout(() => {
+        setControlsVisible(false);
+      }, 2500);
+    }
+  }, [isPlaying, activePopover]);
+
+  useEffect(() => {
+    resetControlsHideTimer();
+    return () => {
+      if (hideTimerRef.current !== null) {
+        window.clearTimeout(hideTimerRef.current);
+      }
+    };
+  }, [isPlaying, activePopover, resetControlsHideTimer]);
 
   // Initialize or reload HLS stream
   const initStream = useCallback(
@@ -165,7 +232,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!video) return;
 
     const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
+    const onPause = () => {
+      setIsPlaying(false);
+      setControlsVisible(true);
+    };
     const onTimeUpdate = () => {
       setCurrentTime(video.currentTime);
       if (video.buffered.length > 0) {
@@ -225,8 +295,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const next = Math.max(0, Math.min(maxDur || Infinity, video.currentTime + deltaSeconds));
       video.currentTime = next;
       setCurrentTime(next);
+      resetControlsHideTimer();
     },
-    [duration]
+    [duration, resetControlsHideTimer]
   );
 
   const seekTo = useCallback((targetSeconds: number) => {
@@ -289,7 +360,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [subtitleTracks, selectedSubtitleIndex]);
 
-  // Global keyboard shortcuts (Space, K, J, L, Arrows, F, M, C)
+  // Global keyboard shortcuts (Space, K, J, L, Arrows, F, M, C, Escape)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -339,38 +410,71 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           e.preventDefault();
           cycleSubtitles();
           break;
+        case 'escape':
+          if (activePopover !== 'none') {
+            setActivePopover('none');
+          }
+          break;
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [togglePlay, seekBy, handleVolumeChange, volume, toggleMute, toggleFullscreen, cycleSubtitles]);
+  }, [
+    togglePlay,
+    seekBy,
+    handleVolumeChange,
+    volume,
+    toggleMute,
+    toggleFullscreen,
+    cycleSubtitles,
+    activePopover,
+  ]);
 
-  // Handle Subtitle track switching
+  // Handle Subtitle track switching with custom overlay cue rendering (hidden native track + cuechange listener)
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     const existingTracks = video.querySelectorAll('track');
     existingTracks.forEach((t) => t.remove());
+    setActiveCueText('');
 
     if (selectedSubtitleIndex !== null) {
       const sub = subtitleTracks.find((s) => s.index === selectedSubtitleIndex);
       if (sub) {
-        const track = document.createElement('track');
-        track.kind = 'subtitles';
-        track.label = sub.title || sub.language?.toUpperCase() || `TRACK ${sub.index}`;
-        track.srclang = sub.language || 'en';
-        track.src = api.getSubtitleUrl(item.id, sub.index);
-        track.default = true;
+        const trackEl = document.createElement('track');
+        trackEl.kind = 'subtitles';
+        trackEl.label = sub.title || sub.language?.toUpperCase() || `TRACK ${sub.index}`;
+        trackEl.srclang = sub.language || 'en';
+        trackEl.src = api.getSubtitleUrl(item.id, sub.index);
+        trackEl.default = true;
 
-        track.addEventListener('load', () => {
-          for (let i = 0; i < video.textTracks.length; i++) {
-            video.textTracks[i].mode = 'showing';
+        const syncCues = () => {
+          const tt = trackEl.track;
+          tt.mode = 'hidden'; // Render via our customizable subtitle overlay instead of browser default
+          const cues = tt.activeCues;
+          if (cues && cues.length > 0) {
+            const lines: string[] = [];
+            for (let i = 0; i < cues.length; i++) {
+              const cue = cues[i] as VTTCue;
+              if (cue.text) {
+                lines.push(cue.text.replace(/<[^>]+>/g, ''));
+              }
+            }
+            setActiveCueText(lines.join('\n'));
+          } else {
+            setActiveCueText('');
           }
+        };
+
+        trackEl.addEventListener('load', () => {
+          trackEl.track.mode = 'hidden';
+          trackEl.track.addEventListener('cuechange', syncCues);
+          syncCues();
         });
 
-        video.appendChild(track);
+        video.appendChild(trackEl);
       }
     } else {
       for (let i = 0; i < video.textTracks.length; i++) {
@@ -416,28 +520,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     });
   };
 
+  const showOverlay = controlsVisible || !isPlaying || activePopover !== 'none';
+
   return (
     <div className="player-container">
-      {/* Player Header */}
-      <div className="player-header">
-        <div className="player-header-left">
-          <button type="button" className="brutalist-btn" onClick={onBack}>
-            [&lt; RETURN TO BROWSER]
-          </button>
-          <div className="player-title" title={item.file_name}>
-            NOW STREAMING: {item.file_name}
-          </div>
-        </div>
-
-        <div className="player-header-badges">
-          <span className="badge badge-inverted">{transcoderBadge}</span>
-          <span className="badge">[STATE: {streamStatus}]</span>
-        </div>
-      </div>
-
-      {/* Custom Brutalist HUD Video Stage */}
-      <div ref={stageRef} className={`player-stage ${isFullscreen ? 'is-fullscreen' : ''}`}>
-        <div className="player-video-wrapper" onClick={togglePlay} onDoubleClick={toggleFullscreen}>
+      {/* Unified Embedded Video Stage (Everything overlaid on the video canvas, auto-hiding on inactivity) */}
+      <div
+        ref={stageRef}
+        className={`player-stage embedded-stage ${isFullscreen ? 'is-fullscreen' : ''} ${
+          showOverlay ? 'controls-visible' : 'controls-hidden'
+        }`}
+        onMouseMove={resetControlsHideTimer}
+        onMouseEnter={resetControlsHideTimer}
+        onTouchStart={resetControlsHideTimer}
+      >
+        <div
+          className="player-video-wrapper"
+          onClick={() => {
+            if (activePopover !== 'none') {
+              setActivePopover('none');
+            } else {
+              togglePlay();
+            }
+          }}
+          onDoubleClick={toggleFullscreen}
+        >
           <video
             ref={videoRef}
             className="player-video-element"
@@ -445,10 +552,335 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             autoPlay
           />
 
-          {/* Center Paused / Buffering HUD Indicator */}
-          {!isPlaying && !playerError && (
-            <div className="hud-center-badge">
-              {streamStatus === 'CONNECTING' ? '[BUFFERING STREAM...]' : '[PAUSED // CLICK OR SPACE]'}
+          {/* Customizable Subtitle Overlay */}
+          {activeCueText && (
+            <div
+              className="custom-subtitle-overlay"
+              style={{
+                bottom: `${subSettings.bottomOffset}%`,
+              }}
+            >
+              <span
+                className="custom-subtitle-box"
+                style={{
+                  fontSize: `${subSettings.fontSize}rem`,
+                  color: subSettings.textColor,
+                  backgroundColor: `rgba(0, 0, 0, ${subSettings.bgOpacity})`,
+                  textShadow: subSettings.outline
+                    ? '-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 0 6px #000'
+                    : 'none',
+                }}
+              >
+                {activeCueText}
+              </span>
+            </div>
+          )}
+
+          {/* Embedded Top Overlay Bar (auto-hides with controls) */}
+          <div
+            className={`embedded-top-bar ${showOverlay ? 'visible' : ''}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="player-header-left">
+              <button type="button" className="brutalist-btn sm" onClick={onBack}>
+                [&lt; BACK]
+              </button>
+              <div className="player-title" title={item.file_name}>
+                {item.file_name}
+              </div>
+            </div>
+            <div className="player-header-badges">
+              <span className="badge">[{streamStatus}]</span>
+              <button
+                type="button"
+                className={`brutalist-btn sm ${activePopover === 'tracks' ? 'active' : ''}`}
+                onClick={() =>
+                  setActivePopover((p) => (p === 'tracks' ? 'none' : 'tracks'))
+                }
+              >
+                [AUDIO / SUBS]
+              </button>
+              <button
+                type="button"
+                className={`brutalist-btn sm ${activePopover === 'subSettings' ? 'active' : ''}`}
+                onClick={() =>
+                  setActivePopover((p) => (p === 'subSettings' ? 'none' : 'subSettings'))
+                }
+              >
+                [SUB SETTINGS]
+              </button>
+            </div>
+          </div>
+
+          {/* On-Video Center Transport Controls (Rewind 10s, Play/Pause, Forward 10s) */}
+          <div
+            className={`on-video-center-controls ${showOverlay ? 'visible' : ''}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="on-video-action-btn"
+              onClick={() => seekBy(-10)}
+              title="Rewind 10s (J)"
+            >
+              « 10S
+            </button>
+            <button
+              type="button"
+              className="on-video-action-btn primary"
+              onClick={togglePlay}
+              title="Play / Pause (Space)"
+            >
+              {streamStatus === 'CONNECTING'
+                ? 'WAIT...'
+                : isPlaying
+                ? '❚❚ PAUSE'
+                : '▶ PLAY'}
+            </button>
+            <button
+              type="button"
+              className="on-video-action-btn"
+              onClick={() => seekBy(10)}
+              title="Forward 10s (L)"
+            >
+              10S »
+            </button>
+          </div>
+
+          {/* Embedded Audio & Subtitle Track Routing Popover */}
+          {activePopover === 'tracks' && (
+            <div
+              className="embedded-popover"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="embedded-popover-header">
+                <span>[AUDIO & SUBTITLE ROUTING]</span>
+                <button
+                  type="button"
+                  className="brutalist-btn sm"
+                  onClick={() => setActivePopover('none')}
+                >
+                  [X CLOSE]
+                </button>
+              </div>
+
+              <div className="embedded-popover-body">
+                <div className="popover-section">
+                  <div className="popover-section-title">
+                    AUDIO TRACKS (ACTIVE: #{selectedAudioIndex})
+                  </div>
+                  <div className="track-list">
+                    {audioTracks.length > 0 ? (
+                      audioTracks.map((track) => (
+                        <div
+                          key={track.index}
+                          className={`track-item ${
+                            track.index === selectedAudioIndex ? 'selected' : ''
+                          }`}
+                          onClick={() => handleSelectAudio(track.index)}
+                          role="button"
+                          tabIndex={0}
+                        >
+                          <div>
+                            <strong>#{track.index}:</strong>{' '}
+                            {track.title || track.codec.toUpperCase()} [
+                            {track.language ? track.language.toUpperCase() : 'UND'}]
+                          </div>
+                          <div>{track.channels}CH</div>
+                        </div>
+                      ))
+                    ) : (
+                      <div style={{ opacity: 0.7, padding: '6px' }}>[DEFAULT AUDIO STREAM]</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="popover-section">
+                  <div className="popover-section-title">
+                    SUBTITLE TRACKS (ACTIVE:{' '}
+                    {selectedSubtitleIndex !== null ? `#${selectedSubtitleIndex}` : 'OFF'})
+                  </div>
+                  <div className="track-list">
+                    <div
+                      className={`track-item ${selectedSubtitleIndex === null ? 'selected' : ''}`}
+                      onClick={() => setSelectedSubtitleIndex(null)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <strong>[DISABLE SUBTITLES]</strong>
+                      <span>OFF</span>
+                    </div>
+                    {subtitleTracks.map((sub) => (
+                      <div
+                        key={sub.index}
+                        className={`track-item ${
+                          selectedSubtitleIndex === sub.index ? 'selected' : ''
+                        }`}
+                        style={
+                          sub.is_bitmap ? { opacity: 0.5, cursor: 'not-allowed' } : undefined
+                        }
+                        onClick={() => {
+                          if (!sub.is_bitmap) setSelectedSubtitleIndex(sub.index);
+                        }}
+                        role="button"
+                        tabIndex={sub.is_bitmap ? -1 : 0}
+                      >
+                        <div>
+                          <strong>#{sub.index}:</strong> {sub.title || sub.codec.toUpperCase()} [
+                          {sub.language ? sub.language.toUpperCase() : 'UND'}]
+                        </div>
+                        <div>
+                          {sub.is_bitmap
+                            ? '[BITMAP]'
+                            : sub.is_forced
+                            ? '[FORCED]'
+                            : sub.is_default
+                            ? '[DEFAULT]'
+                            : ''}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Embedded Subtitle Appearance Settings Popover */}
+          {activePopover === 'subSettings' && (
+            <div
+              className="embedded-popover"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="embedded-popover-header">
+                <span>[SUBTITLE APPEARANCE SETTINGS]</span>
+                <button
+                  type="button"
+                  className="brutalist-btn sm"
+                  onClick={() => setActivePopover('none')}
+                >
+                  [X CLOSE]
+                </button>
+              </div>
+
+              <div className="embedded-popover-body">
+                {/* Font Size */}
+                <div className="sub-setting-row">
+                  <span>FONT SIZE: {(subSettings.fontSize * 100).toFixed(0)}%</span>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    {[
+                      { label: 'SM', val: 1.0 },
+                      { label: 'MD', val: 1.35 },
+                      { label: 'LG', val: 1.75 },
+                      { label: 'XL', val: 2.2 },
+                    ].map((opt) => (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        className={`brutalist-btn sm ${
+                          Math.abs(subSettings.fontSize - opt.val) < 0.05 ? 'active' : ''
+                        }`}
+                        onClick={() => updateSubSettings({ fontSize: opt.val })}
+                      >
+                        [{opt.label}]
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Text Color */}
+                <div className="sub-setting-row">
+                  <span>TEXT COLOR:</span>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {[
+                      { label: 'WHITE', val: '#FFFFFF' },
+                      { label: 'YELLOW', val: '#FFFF00' },
+                      { label: 'CYAN', val: '#00FFFF' },
+                      { label: 'GREEN', val: '#00FF66' },
+                    ].map((c) => (
+                      <button
+                        key={c.label}
+                        type="button"
+                        className={`brutalist-btn sm ${
+                          subSettings.textColor === c.val ? 'active' : ''
+                        }`}
+                        onClick={() => updateSubSettings({ textColor: c.val })}
+                      >
+                        [{c.label}]
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Background Opacity */}
+                <div className="sub-setting-row">
+                  <span>BOX OPACITY: {Math.round(subSettings.bgOpacity * 100)}%</span>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    {[
+                      { label: '0%', val: 0 },
+                      { label: '50%', val: 0.5 },
+                      { label: '75%', val: 0.75 },
+                      { label: '100%', val: 1.0 },
+                    ].map((o) => (
+                      <button
+                        key={o.label}
+                        type="button"
+                        className={`brutalist-btn sm ${
+                          Math.abs(subSettings.bgOpacity - o.val) < 0.05 ? 'active' : ''
+                        }`}
+                        onClick={() => updateSubSettings({ bgOpacity: o.val })}
+                      >
+                        [{o.label}]
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Vertical Position / Offset */}
+                <div className="sub-setting-row">
+                  <span>VERTICAL OFFSET: {subSettings.bottomOffset}%</span>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    {[
+                      { label: 'LOW', val: 6 },
+                      { label: 'NORMAL', val: 12 },
+                      { label: 'HIGH', val: 20 },
+                      { label: 'TOP-MID', val: 30 },
+                    ].map((pos) => (
+                      <button
+                        key={pos.label}
+                        type="button"
+                        className={`brutalist-btn sm ${
+                          subSettings.bottomOffset === pos.val ? 'active' : ''
+                        }`}
+                        onClick={() => updateSubSettings({ bottomOffset: pos.val })}
+                      >
+                        [{pos.label}]
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Hard Text Outline Toggle & Reset */}
+                <div className="sub-setting-row">
+                  <span>TEXT OUTLINE:</span>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button
+                      type="button"
+                      className={`brutalist-btn sm ${subSettings.outline ? 'active' : ''}`}
+                      onClick={() => updateSubSettings({ outline: !subSettings.outline })}
+                    >
+                      [{subSettings.outline ? 'ON' : 'OFF'}]
+                    </button>
+                    <button
+                      type="button"
+                      className="brutalist-btn sm"
+                      onClick={() => updateSubSettings(DEFAULT_SUB_SETTINGS)}
+                    >
+                      [RESET DEFAULTS]
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -469,264 +901,178 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </button>
             </div>
           )}
-        </div>
 
-        {/* Custom Brutalist HUD Transport Deck */}
-        <div className="hud-deck">
-          {/* Interactive Scrub Timeline with Time Preview */}
+          {/* Embedded Bottom HUD Transport Bar (auto-hides on mouse inactivity) */}
           <div
-            ref={seekBarRef}
-            className="hud-timeline-wrapper"
-            onMouseMove={handleTimelineMouseMove}
-            onMouseLeave={() => setHoverTime(null)}
+            className={`hud-deck embedded-hud-deck ${showOverlay ? 'visible' : ''}`}
+            onClick={(e) => e.stopPropagation()}
           >
-            {hoverTime && (
-              <div
-                className="hud-timeline-tooltip"
-                style={{ left: `${Math.min(94, Math.max(6, hoverTime.percent))}%` }}
-              >
-                [{formatTime(hoverTime.time)}]
-              </div>
-            )}
-            <div className="hud-timeline-buffer" style={{ width: `${bufferPercent}%` }} />
-            <input
-              type="range"
-              aria-label="Seek timeline"
-              aria-valuetext={`${formatTime(currentTime)} of ${formatTime(effectiveDuration)}`}
-              className="brutalist-slider hud-seek-slider"
-              min={0}
-              max={effectiveDuration}
-              step={0.1}
-              value={currentTime}
-              style={
-                {
-                  '--attr-min': 0,
-                  '--attr-max': effectiveDuration,
-                  '--control-value': currentTime,
-                  '--slider-progress': `${progressPercent}%`,
-                } as React.CSSProperties
-              }
-              onChange={(e) => seekTo( parseFloat(e.target.value) )}
-            />
-          </div>
-
-          {/* Primary Transport Controls Row */}
-          <div className="hud-controls-row">
-            <div className="hud-controls-group">
-              <button
-                type="button"
-                className="brutalist-btn sm hud-btn"
-                onClick={togglePlay}
-                title="Play / Pause (Space or K)"
-              >
-                {isPlaying ? '[❚❚ PAUSE]' : '[▶ PLAY]'}
-              </button>
-
-              <button
-                type="button"
-                className="brutalist-btn sm hud-btn"
-                onClick={() => seekBy(-10)}
-                title="Rewind 10s (J)"
-              >
-                [-10S]
-              </button>
-
-              <button
-                type="button"
-                className="brutalist-btn sm hud-btn"
-                onClick={() => seekBy(10)}
-                title="Forward 10s (L)"
-              >
-                [+10S]
-              </button>
-
-              <span className="hud-timecode">
-                {formatTime(currentTime)} / {formatTime(effectiveDuration)}
-              </span>
+            {/* Interactive Scrub Timeline with Time Preview */}
+            <div
+              ref={seekBarRef}
+              className="hud-timeline-wrapper"
+              onMouseMove={handleTimelineMouseMove}
+              onMouseLeave={() => setHoverTime(null)}
+            >
+              {hoverTime && (
+                <div
+                  className="hud-timeline-tooltip"
+                  style={{ left: `${Math.min(94, Math.max(6, hoverTime.percent))}%` }}
+                >
+                  [{formatTime(hoverTime.time)}]
+                </div>
+              )}
+              <div className="hud-timeline-buffer" style={{ width: `${bufferPercent}%` }} />
+              <input
+                type="range"
+                aria-label="Seek timeline"
+                aria-valuetext={`${formatTime(currentTime)} of ${formatTime(effectiveDuration)}`}
+                className="brutalist-slider hud-seek-slider"
+                min={0}
+                max={effectiveDuration}
+                step={0.1}
+                value={currentTime}
+                style={
+                  {
+                    '--attr-min': 0,
+                    '--attr-max': effectiveDuration,
+                    '--control-value': currentTime,
+                    '--slider-progress': `${progressPercent}%`,
+                  } as React.CSSProperties
+                }
+                onChange={(e) => seekTo(parseFloat(e.target.value))}
+              />
             </div>
 
-            <div className="hud-controls-group">
-              {/* Volume Control */}
-              <div className="hud-volume-box">
+            {/* Primary Transport Controls Row */}
+            <div className="hud-controls-row">
+              <div className="hud-controls-group">
                 <button
                   type="button"
                   className="brutalist-btn sm hud-btn"
-                  onClick={toggleMute}
-                  title="Mute / Unmute (M)"
+                  onClick={togglePlay}
+                  title="Play / Pause (Space or K)"
                 >
-                  {isMuted || effectiveVolume === 0 ? '[MUTE]' : `[VOL ${Math.round(effectiveVolume * 100)}%]`}
+                  {isPlaying ? '[❚❚]' : '[▶]'}
                 </button>
-                <input
-                  type="range"
-                  aria-label="Volume"
-                  aria-valuetext={`${Math.round(effectiveVolume * 100)}%`}
-                  className="brutalist-slider hud-volume-slider"
-                  min={0}
-                  max={1}
-                  step={0.02}
-                  value={effectiveVolume}
-                  style={
-                    {
-                      '--attr-min': 0,
-                      '--attr-max': 1,
-                      '--control-value': effectiveVolume,
-                      '--slider-progress': `${effectiveVolume * 100}%`,
-                    } as React.CSSProperties
-                  }
-                  onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
-                />
-              </div>
 
-              {/* Playback Speed */}
-              <button
-                type="button"
-                className="brutalist-btn sm hud-btn"
-                onClick={cyclePlaybackSpeed}
-                title="Cycle Playback Speed"
-              >
-                [{playbackRate}X]
-              </button>
-
-              {/* Subtitle Quick Cycle */}
-              <button
-                type="button"
-                className={`brutalist-btn sm hud-btn ${selectedSubtitleIndex !== null ? 'active' : ''}`}
-                onClick={cycleSubtitles}
-                title="Cycle Subtitles (C)"
-              >
-                [CC: {selectedSubtitleIndex !== null ? `#${selectedSubtitleIndex}` : 'OFF'}]
-              </button>
-
-              {/* Fullscreen Toggle */}
-              <button
-                type="button"
-                className="brutalist-btn sm hud-btn"
-                onClick={toggleFullscreen}
-                title="Toggle Fullscreen (F)"
-              >
-                {isFullscreen ? '[EXIT FULL]' : '[FULLSCREEN]'}
-              </button>
-            </div>
-          </div>
-
-          {/* Shortcut Legend Bar */}
-          <div className="hud-shortcuts-bar">
-            <span>KEYS: [SPACE/K] PLAY/PAUSE</span>
-            <span>[J/L] ±10S</span>
-            <span>[←/→] ±5S</span>
-            <span>[↑/↓] VOL</span>
-            <span>[M] MUTE</span>
-            <span>[C] SUBS</span>
-            <span>[F] FULLSCREEN</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Dynamic Controls Grid: Audio & Subtitle Track Selectors */}
-      <div className="player-controls-grid">
-        {/* Audio Track Selector */}
-        <div className="control-panel">
-          <div className="control-panel-title">
-            <span>[AUDIO TRACK ROUTING]</span>
-            <span className="badge">
-              ACTIVE: #{selectedAudioIndex} (
-              {audioTracks
-                .find((a) => a.index === selectedAudioIndex)
-                ?.language?.toUpperCase() || 'DEFAULT'}
-              )
-            </span>
-          </div>
-
-          <div className="track-list">
-            {audioTracks.length > 0 ? (
-              audioTracks.map((track) => (
-                <div
-                  key={track.index}
-                  className={`track-item ${track.index === selectedAudioIndex ? 'selected' : ''}`}
-                  onClick={() => handleSelectAudio(track.index)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      handleSelectAudio(track.index);
-                    }
-                  }}
+                <button
+                  type="button"
+                  className="brutalist-btn sm hud-btn"
+                  onClick={() => seekBy(-10)}
+                  title="Rewind 10s (J)"
                 >
-                  <div>
-                    <strong>TRACK #{track.index}:</strong>{' '}
-                    {track.title || track.codec.toUpperCase()} [
-                    {track.language ? track.language.toUpperCase() : 'UND'}]
-                  </div>
-                  <div>
-                    {track.channels}CH {track.channel_layout ? `(${track.channel_layout})` : ''}
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div style={{ opacity: 0.7, padding: '8px' }}>
-                [NO MULTIPLE AUDIO TRACKS DETECTED]
+                  [-10S]
+                </button>
+
+                <button
+                  type="button"
+                  className="brutalist-btn sm hud-btn"
+                  onClick={() => seekBy(10)}
+                  title="Forward 10s (L)"
+                >
+                  [+10S]
+                </button>
+
+                <span className="hud-timecode">
+                  {formatTime(currentTime)} / {formatTime(effectiveDuration)}
+                </span>
               </div>
-            )}
-          </div>
-        </div>
 
-        {/* Subtitle Track Selector */}
-        <div className="control-panel">
-          <div className="control-panel-title">
-            <span>[SUBTITLE TRACK ROUTING]</span>
-            <span className="badge">
-              ACTIVE: {selectedSubtitleIndex !== null ? `#${selectedSubtitleIndex}` : '[OFF]'}
-            </span>
-          </div>
+              <div className="hud-controls-group">
+                {/* Volume Control */}
+                <div className="hud-volume-box">
+                  <button
+                    type="button"
+                    className="brutalist-btn sm hud-btn"
+                    onClick={toggleMute}
+                    title="Mute / Unmute (M)"
+                  >
+                    {isMuted || effectiveVolume === 0
+                      ? '[MUTE]'
+                      : `[VOL ${Math.round(effectiveVolume * 100)}%]`}
+                  </button>
+                  <input
+                    type="range"
+                    aria-label="Volume"
+                    aria-valuetext={`${Math.round(effectiveVolume * 100)}%`}
+                    className="brutalist-slider hud-volume-slider"
+                    min={0}
+                    max={1}
+                    step={0.02}
+                    value={effectiveVolume}
+                    style={
+                      {
+                        '--attr-min': 0,
+                        '--attr-max': 1,
+                        '--control-value': effectiveVolume,
+                        '--slider-progress': `${effectiveVolume * 100}%`,
+                      } as React.CSSProperties
+                    }
+                    onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                  />
+                </div>
 
-          <div className="track-list">
-            <div
-              className={`track-item ${selectedSubtitleIndex === null ? 'selected' : ''}`}
-              onClick={() => setSelectedSubtitleIndex(null)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  setSelectedSubtitleIndex(null);
-                }
-              }}
-            >
-              <strong>[DISABLE SUBTITLES]</strong>
-              <span>OFF</span>
-            </div>
+                {/* Playback Speed */}
+                <button
+                  type="button"
+                  className="brutalist-btn sm hud-btn"
+                  onClick={cyclePlaybackSpeed}
+                  title="Cycle Playback Speed"
+                >
+                  [{playbackRate}X]
+                </button>
 
-            {subtitleTracks.map((sub) => (
-              <div
-                key={sub.index}
-                className={`track-item ${selectedSubtitleIndex === sub.index ? 'selected' : ''}`}
-                style={sub.is_bitmap ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
-                onClick={() => {
-                  if (!sub.is_bitmap) setSelectedSubtitleIndex(sub.index);
-                }}
-                role="button"
-                tabIndex={sub.is_bitmap ? -1 : 0}
-                aria-disabled={sub.is_bitmap}
-                onKeyDown={(e) => {
-                  if (!sub.is_bitmap && (e.key === 'Enter' || e.key === ' ')) {
-                    setSelectedSubtitleIndex(sub.index);
+                {/* Subtitle Quick Cycle */}
+                <button
+                  type="button"
+                  className={`brutalist-btn sm hud-btn ${
+                    selectedSubtitleIndex !== null ? 'active' : ''
+                  }`}
+                  onClick={cycleSubtitles}
+                  title="Cycle Subtitles (C)"
+                >
+                  [CC: {selectedSubtitleIndex !== null ? `#${selectedSubtitleIndex}` : 'OFF'}]
+                </button>
+
+                {/* Track & Subtitle Settings Triggers */}
+                <button
+                  type="button"
+                  className={`brutalist-btn sm hud-btn ${
+                    activePopover === 'tracks' ? 'active' : ''
+                  }`}
+                  onClick={() =>
+                    setActivePopover((p) => (p === 'tracks' ? 'none' : 'tracks'))
                   }
-                }}
-              >
-                <div>
-                  <strong>TRACK #{sub.index}:</strong> {sub.title || sub.codec.toUpperCase()} [
-                  {sub.language ? sub.language.toUpperCase() : 'UND'}]
-                </div>
-                <div>
-                  {sub.is_bitmap
-                    ? '[BITMAP / UNSUPPORTED]'
-                    : sub.is_forced
-                    ? '[FORCED]'
-                    : sub.is_default
-                    ? '[DEFAULT]'
-                    : ''}
-                </div>
+                  title="Audio & Subtitle Tracks"
+                >
+                  [TRACKS]
+                </button>
+
+                <button
+                  type="button"
+                  className={`brutalist-btn sm hud-btn ${
+                    activePopover === 'subSettings' ? 'active' : ''
+                  }`}
+                  onClick={() =>
+                    setActivePopover((p) => (p === 'subSettings' ? 'none' : 'subSettings'))
+                  }
+                  title="Subtitle Style Settings"
+                >
+                  [SUB STYLE]
+                </button>
+
+                {/* Fullscreen Toggle */}
+                <button
+                  type="button"
+                  className="brutalist-btn sm hud-btn"
+                  onClick={toggleFullscreen}
+                  title="Toggle Fullscreen (F)"
+                >
+                  {isFullscreen ? '[EXIT FULL]' : '[FULL]'}
+                </button>
               </div>
-            ))}
+            </div>
           </div>
         </div>
       </div>
