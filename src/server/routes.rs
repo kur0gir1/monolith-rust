@@ -5,6 +5,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use std::path::PathBuf;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
@@ -13,8 +14,8 @@ use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::server::handlers::{
     get_media_by_id, get_media_index, get_party_state, get_poster, get_status, get_tunnel_status,
-    open_in_browser, rotate_tunnel_token, start_tunnel, stop_tunnel, trigger_scan,
-    update_party_state,
+    kill_tunnel, leave_party, open_in_browser, rotate_tunnel_token, start_tunnel, stop_tunnel,
+    trigger_scan, update_party_state,
 };
 use crate::server::stream_handler::{
     get_master_playlist, get_segment, get_subtitles, get_variant_playlist, switch_audio,
@@ -192,8 +193,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/tunnel", get(get_tunnel_status))
         .route("/tunnel/start", post(start_tunnel))
         .route("/tunnel/stop", post(stop_tunnel))
+        .route("/tunnel/kill", post(kill_tunnel))
         .route("/tunnel/rotate", post(rotate_tunnel_token))
         .route("/party", get(get_party_state).post(update_party_state))
+        .route("/party/leave", post(leave_party))
         .route("/open-browser", post(open_in_browser));
 
     let mut frontend_dist = PathBuf::from("frontend/dist");
@@ -219,7 +222,8 @@ pub fn create_router(state: AppState) -> Router {
             state.clone(),
             invite_auth_middleware,
         ))
-        .layer(CorsLayer::permissive());
+        .layer(CorsLayer::permissive())
+        .layer(CompressionLayer::new());
 
     if frontend_dist.exists() && frontend_dist.join("index.html").exists() {
         info!("Serving compiled frontend SPA from {}", frontend_dist.display());

@@ -1,15 +1,18 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, Suspense, lazy } from 'react';
 import { MediaItem, PartyState, ServerStatus } from './types/media';
 import { api, setInviteTokenManual } from './api/client';
 import { NoiseOverlay } from './components/NoiseOverlay';
 import { Header } from './components/Header';
 import { MediaBrowser } from './components/MediaBrowser';
-import { VideoPlayer } from './components/VideoPlayer';
 import {
   WatchProgressMap,
   loadWatchProgress,
   updateVideoProgressMap,
 } from './utils/watchProgress';
+
+const VideoPlayer = lazy(() =>
+  import('./components/VideoPlayer').then((m) => ({ default: m.VideoPlayer }))
+);
 
 export const App: React.FC = () => {
   const [view, setView] = useState<'browser' | 'player'>('browser');
@@ -78,9 +81,19 @@ export const App: React.FC = () => {
         .catch(() => {});
     }, 1200);
 
+    const handleUnload = () => {
+      api.leaveParty();
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+
     return () => {
       clearInterval(statusInterval);
       clearInterval(partyInterval);
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+      handleUnload();
     };
   }, [loadData]);
 
@@ -236,13 +249,24 @@ export const App: React.FC = () => {
                 isScanning={isScanning}
               />
             ) : selectedItem ? (
-              <VideoPlayer
-                item={selectedItem}
-                serverStatus={serverStatus}
-                initialProgress={watchProgress[selectedItem.id]}
-                onProgressUpdate={handleProgressUpdate}
-                onBack={handleBackToBrowser}
-              />
+              <Suspense
+                fallback={
+                  <div className="empty-state">
+                    <span className="loading-spinner">■</span>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>
+                      [LOADING VIDEO ENGINE...]
+                    </div>
+                  </div>
+                }
+              >
+                <VideoPlayer
+                  item={selectedItem}
+                  serverStatus={serverStatus}
+                  initialProgress={watchProgress[selectedItem.id]}
+                  onProgressUpdate={handleProgressUpdate}
+                  onBack={handleBackToBrowser}
+                />
+              </Suspense>
             ) : null}
           </>
         )}

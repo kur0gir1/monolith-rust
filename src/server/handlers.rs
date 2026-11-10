@@ -198,6 +198,11 @@ pub async fn stop_tunnel(State(state): State<AppState>) -> Json<TunnelStatus> {
     Json(state.tunnel.stop().await)
 }
 
+/// POST /api/tunnel/kill
+pub async fn kill_tunnel(State(state): State<AppState>) -> Json<TunnelStatus> {
+    Json(state.tunnel.kill().await)
+}
+
 /// POST /api/tunnel/rotate
 pub async fn rotate_tunnel_token(State(state): State<AppState>) -> Json<TunnelStatus> {
     Json(state.tunnel.rotate_token().await)
@@ -205,6 +210,11 @@ pub async fn rotate_tunnel_token(State(state): State<AppState>) -> Json<TunnelSt
 
 #[derive(Debug, Deserialize)]
 pub struct PartyQuery {
+    pub peer_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PartyLeaveRequest {
     pub peer_id: Option<String>,
 }
 
@@ -222,6 +232,18 @@ pub async fn update_party_state(
     Json(payload): Json<PartyUpdateRequest>,
 ) -> Json<PartyState> {
     Json(state.party.update(payload).await)
+}
+
+/// POST /api/party/leave
+pub async fn leave_party(
+    State(state): State<AppState>,
+    Json(payload): Json<PartyLeaveRequest>,
+) -> Json<PartyState> {
+    if let Some(id) = payload.peer_id {
+        Json(state.party.remove_peer(&id).await)
+    } else {
+        Json(state.party.get_state(None).await)
+    }
 }
 
 #[derive(Debug, Deserialize)]

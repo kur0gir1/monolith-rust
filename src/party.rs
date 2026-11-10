@@ -145,4 +145,29 @@ impl PartyManager {
 
         guard.state.clone()
     }
+
+    pub async fn remove_peer(&self, peer_id: &str) -> PartyState {
+        let mut guard = self.inner.write().await;
+        guard.peers.remove(peer_id);
+        guard.state.active_peers = guard.peers.len().max(1);
+        guard.state.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_peer_registration_and_removal() {
+        let mgr = PartyManager::new();
+        let st1 = mgr.get_state(Some("peer-alpha")).await;
+        assert_eq!(st1.active_peers, 1);
+
+        let st2 = mgr.get_state(Some("peer-beta")).await;
+        assert_eq!(st2.active_peers, 2);
+
+        let st3 = mgr.remove_peer("peer-alpha").await;
+        assert_eq!(st3.active_peers, 1);
+    }
 }

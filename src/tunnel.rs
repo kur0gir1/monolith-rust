@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -12,36 +13,50 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TunnelProvider {
+    #[serde(rename = "cloudflare")]
+    Cloudflare,
     #[serde(rename = "localhost.run")]
     LocalhostRun,
     #[serde(rename = "serveo.net")]
     Serveo,
-    #[serde(rename = "cloudflare")]
-    Cloudflare,
 }
 
 impl Default for TunnelProvider {
     fn default() -> Self {
-        Self::LocalhostRun
+        Self::Cloudflare
     }
 }
 
 impl TunnelProvider {
     pub fn from_str_opt(s: Option<&str>) -> Self {
         match s.map(|v| v.to_lowercase()).as_deref() {
-            Some("cloudflare") | Some("cloudflared") => Self::Cloudflare,
+            Some("localhost.run") | Some("localhost") => Self::LocalhostRun,
             Some("serveo") | Some("serveo.net") => Self::Serveo,
-            _ => Self::LocalhostRun,
+            _ => Self::Cloudflare,
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Cloudflare => "CLOUDFLARE QUICK TUNNEL (GLOBAL EDGE)",
             Self::LocalhostRun => "LOCALHOST.RUN (SSH TLS)",
             Self::Serveo => "SERVEO.NET (SSH TLS)",
-            Self::Cloudflare => "CLOUDFLARE QUICK TUNNEL",
         }
     }
+}
+
+pub fn find_cloudflared_executable() -> PathBuf {
+    let candidates = [
+        r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+        r"C:\Program Files\cloudflared\cloudflared.exe",
+    ];
+    for c in candidates {
+        let p = Path::new(c);
+        if p.exists() {
+            return p.to_path_buf();
+        }
+    }
+    PathBuf::from("cloudflared")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +97,7 @@ impl TunnelManager {
             inner: Arc::new(RwLock::new(TunnelInner {
                 active: false,
                 status: "OFFLINE".to_string(),
-                provider: TunnelProvider::LocalhostRun,
+                provider: TunnelProvider::Cloudflare,
                 public_url: None,
                 invite_token: Uuid::new_v4().simple().to_string(),
                 error: None,
@@ -139,6 +154,22 @@ impl TunnelManager {
         self.get_status().await
     }
 
+    pub async fn kill(&self) -> TunnelStatus {
+        {
+            let mut guard = self.inner.write().await;
+            if let Some(mut child) = guard.child.take() {
+                let _ = child.start_kill();
+            }
+            guard.active = false;
+            guard.status = "OFFLINE".to_string();
+            guard.public_url = None;
+            guard.error = None;
+            // Invalidate invite token immediately so any existing link becomes invalid
+            guard.invite_token = Uuid::new_v4().simple().to_string();
+        }
+        self.get_status().await
+    }
+
     pub async fn start(&self, provider: TunnelProvider, local_port: u16) -> TunnelStatus {
         // Stop any existing tunnel first
         self.stop().await;
@@ -190,7 +221,8 @@ impl TunnelManager {
                 c
             }
             TunnelProvider::Cloudflare => {
-                let mut c = Command::new("cloudflared");
+                let bin = find_cloudflared_executable();
+                let mut c = Command::new(bin);
                 c.args([
                     "tunnel",
                     "--url",
@@ -289,7 +321,15 @@ impl TunnelManager {
 fn extract_https_url(line: &str) -> Option<String> {
     for token in line.split_whitespace() {
         let cleaned = token.trim_matches(|c: char| {
-            c == ',' || c == ';' || c == '(' || c == ')' || c == '[' || c == ']' || c == '"' || c == '\''
+            c == ','
+                || c == ';'
+                || c == '('
+                || c == ')'
+                || c == '['
+                || c == ']'
+                || c == '"'
+                || c == '\''
+                || c == '|'
         });
         if cleaned.starts_with("https://") {
             // Exclude documentation / admin links printed in banner messages
@@ -309,4 +349,34 @@ fn extract_https_url(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tunnel_kill_invalidates_token() {
+        let mgr = TunnelManager::new();
+        let initial_token = mgr.get_status().await.invite_token;
+        let killed = mgr.kill().await;
+        assert!(!killed.active);
+        assert_eq!(killed.status, "OFFLINE");
+        assert_ne!(killed.invite_token, initial_token);
+        assert!(!mgr.verify_token(Some(&initial_token)).await);
+        assert!(mgr.verify_token(Some(&killed.invite_token)).await);
+    }
+
+    #[test]
+    fn test_extract_cloudflare_url() {
+        let line = "2026-11-10T14:00:00Z INF +--------------------------------------------------------------------------------------------+";
+        let line2 = "2026-11-10T14:00:00Z INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |";
+        let line3 = "2026-11-10T14:00:00Z INF |  https://temporary-subdomain.trycloudflare.com                                         |";
+        assert_eq!(extract_https_url(line), None);
+        assert_eq!(extract_https_url(line2), None);
+        assert_eq!(
+            extract_https_url(line3),
+            Some("https://temporary-subdomain.trycloudflare.com".to_string())
+        );
+    }
 }

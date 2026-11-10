@@ -20,7 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [showPathModal, setShowPathModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [manualPath, setManualPath] = useState('');
-  const [selectedProvider, setSelectedProvider] = useState<string>('localhost.run');
+  const [selectedProvider, setSelectedProvider] = useState<string>('cloudflare');
   const [tunnelStatus, setTunnelStatus] = useState<TunnelStatus | null>(
     serverStatus?.tunnel ?? null
   );
@@ -71,6 +71,18 @@ export const Header: React.FC<HeaderProps> = ({
       setTunnelStatus(st);
     } catch (err) {
       console.error('Failed to stop tunnel:', err);
+    } finally {
+      setIsTunnelBusy(false);
+    }
+  };
+
+  const handleKillTunnel = async () => {
+    setIsTunnelBusy(true);
+    try {
+      const st = await api.killTunnel();
+      setTunnelStatus(st);
+    } catch (err) {
+      console.error('Failed to kill tunnel:', err);
     } finally {
       setIsTunnelBusy(false);
     }
@@ -187,6 +199,16 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 {copiedInvite ? '[COPIED INVITE LINK!]' : '[COPY ENCRYPTED INVITE ⧉]'}
               </button>
+              <button
+                type="button"
+                className="status-link-btn"
+                style={{ background: '#1c0505', color: '#f87171', borderColor: '#ef4444' }}
+                onClick={handleKillTunnel}
+                disabled={isTunnelBusy}
+                title="Immediately terminate tunnel and invalidate invite token"
+              >
+                [KILL LINK ✕]
+              </button>
             </>
           )}
 
@@ -228,19 +250,19 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="provider-grid">
                 {[
                   {
+                    id: 'cloudflare',
+                    label: 'CLOUDFLARE QUICK TUNNEL',
+                    desc: 'FASTEST // GLOBAL EDGE ANYCAST CDN // HIGH BANDWIDTH // RECOMMENDED',
+                  },
+                  {
                     id: 'localhost.run',
                     label: 'LOCALHOST.RUN (SSH TLS)',
-                    desc: 'RECOMMENDED // ZERO INSTALL // USES WINDOWS OPENSSH // NO VIDEO CAPS',
+                    desc: 'BACKUP // BUILT-IN WINDOWS OPENSSH // REVERSE TUNNEL',
                   },
                   {
                     id: 'serveo.net',
                     label: 'SERVEO.NET (SSH TLS)',
-                    desc: 'ALTERNATIVE ZERO-INSTALL SSH REVERSE TUNNEL OVER HTTPS',
-                  },
-                  {
-                    id: 'cloudflare',
-                    label: 'CLOUDFLARE QUICK TUNNEL',
-                    desc: 'REQUIRES CLOUDFLARED BINARY // FAST EDGE CDN',
+                    desc: 'ALTERNATIVE // SSH REVERSE TUNNEL OVER HTTPS',
                   },
                 ].map((prov) => (
                   <div
@@ -313,14 +335,26 @@ export const Header: React.FC<HeaderProps> = ({
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
               {tunnelStatus?.active && (
-                <button
-                  type="button"
-                  className="brutalist-btn sm"
-                  onClick={handleStopTunnel}
-                  disabled={isTunnelBusy}
-                >
-                  [STOP TUNNEL]
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="brutalist-btn sm"
+                    onClick={handleStopTunnel}
+                    disabled={isTunnelBusy}
+                  >
+                    [STOP TUNNEL]
+                  </button>
+                  <button
+                    type="button"
+                    className="brutalist-btn sm"
+                    style={{ background: '#7f1d1d', color: '#fff', borderColor: '#ef4444' }}
+                    onClick={handleKillTunnel}
+                    disabled={isTunnelBusy}
+                    title="Terminate tunnel process and permanently invalidate invite link"
+                  >
+                    [KILL INVITE LINK]
+                  </button>
+                </>
               )}
               <button
                 type="button"

@@ -46,6 +46,7 @@ transcode/
 hls/
 *.m3u8
 *.ts
+!frontend/src/**/*.ts
 *.vtt
 *.mp4
 *.mkv

@@ -86,6 +86,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [activePopover, setActivePopover] = useState<'none' | 'tracks' | 'subSettings'>('none');
   const [partySyncEnabled, setPartySyncEnabled] = useState<boolean>(true);
   const [activePeers, setActivePeers] = useState<number>(1);
+  const [isSyncingParty, setIsSyncingParty] = useState<boolean>(false);
   const lastAppliedSeqRef = useRef<number>(0);
 
   // Custom HUD transport state
@@ -358,6 +359,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     return () => window.clearInterval(syncInterval);
   }, [partySyncEnabled, item.id]);
+
+  const handleRefreshParty = useCallback(async () => {
+    setIsSyncingParty(true);
+    try {
+      const party = await api.getPartyState();
+      setActivePeers(party.active_peers);
+      const video = videoRef.current;
+      if (video && party.media_id === item.id) {
+        lastAppliedSeqRef.current = party.event_seq;
+        if (Math.abs(video.currentTime - party.current_time) > 0.4) {
+          video.currentTime = party.current_time;
+          setCurrentTime(party.current_time);
+        }
+        if (party.is_playing && video.paused) {
+          video.play().catch(() => {});
+        } else if (!party.is_playing && !video.paused) {
+          video.pause();
+        }
+      }
+    } catch (err) {
+      console.warn('Manual party state refresh error:', err);
+    } finally {
+      setTimeout(() => setIsSyncingParty(false), 600);
+    }
+  }, [item.id]);
 
   // Transport actions
   const togglePlay = useCallback(() => {
@@ -692,6 +718,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               >
                 [PARTY SYNC: {partySyncEnabled ? `ON (${activePeers})` : 'OFF'}]
               </button>
+              {partySyncEnabled && (
+                <button
+                  type="button"
+                  className="brutalist-btn sm"
+                  onClick={handleRefreshParty}
+                  disabled={isSyncingParty}
+                  title="Manually poll and align playback with Watch Party peers"
+                >
+                  {isSyncingParty ? '[SYNCING...]' : '[REFRESH SYNC ⟳]'}
+                </button>
+              )}
               <button
                 type="button"
                 className={`brutalist-btn sm ${activePopover === 'tracks' ? 'active' : ''}`}
