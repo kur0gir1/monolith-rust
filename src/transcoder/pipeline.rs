@@ -19,10 +19,10 @@ pub fn build_ffmpeg_transcode_args(
             args.extend([
                 "-hwaccel".to_string(),
                 "cuda".to_string(),
-                "-hwaccel_output_format".to_string(),
-                "cuda".to_string(),
                 "-i".to_string(),
                 input_str,
+                "-vf".to_string(),
+                "format=yuv420p".to_string(),
                 "-c:v".to_string(),
                 "h264_nvenc".to_string(),
                 "-preset".to_string(),
@@ -62,6 +62,8 @@ pub fn build_ffmpeg_transcode_args(
             args.extend([
                 "-i".to_string(),
                 input_str,
+                "-vf".to_string(),
+                "format=yuv420p".to_string(),
                 "-c:v".to_string(),
                 "libx264".to_string(),
                 "-preset".to_string(),

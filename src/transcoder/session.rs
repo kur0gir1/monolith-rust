@@ -68,7 +68,8 @@ impl SessionManager {
 
         if let Some(session) = map.get_mut(media_id) {
             session.last_accessed = Instant::now();
-            if session.active_audio_index == audio_index {
+            let playlist_check = session.temp_dir.join("index.m3u8");
+            if session.active_audio_index == audio_index && playlist_check.exists() {
                 return Ok(HlsStreamInfo {
                     session_id: session.session_id.clone(),
                     master_playlist_url: format!("/api/stream/{}/master.m3u8", media_id),
@@ -81,8 +82,8 @@ impl SessionManager {
                 });
             } else {
                 info!(
-                    "Audio track index changed from {} to {} for media {}. Re-mapping stream...",
-                    session.active_audio_index, audio_index, media_id
+                    "Restarting or re-mapping stream for media {} (audio {})...",
+                    media_id, audio_index
                 );
                 // Stop current transcode child
                 if let Some(mut child) = session.child.take() {
@@ -103,66 +104,103 @@ impl SessionManager {
         let is_h264 = video_codec
             .map(|c| c.eq_ignore_ascii_case("h264") || c.eq_ignore_ascii_case("avc1"))
             .unwrap_or(false);
-        let mode = if is_h264 {
-            // Instant zero-reencode remux when source video is already H.264
-            TranscodeMode::DirectStream
-        } else if probe_nvenc_available() {
-            TranscodeMode::NvencCuda
-        } else {
-            TranscodeMode::CpuLibx264
-        };
+        let nvenc_available = probe_nvenc_available();
+
+        let mut candidate_modes = Vec::new();
+        if is_h264 {
+            candidate_modes.push(TranscodeMode::DirectStream);
+        }
+        if nvenc_available {
+            candidate_modes.push(TranscodeMode::NvencCuda);
+        }
+        candidate_modes.push(TranscodeMode::CpuLibx264);
 
         let ffmpeg = find_ffmpeg();
-        let mut args = vec!["-y".to_string(), "-v".to_string(), "error".to_string()];
-        args.extend(build_ffmpeg_transcode_args(
-            &mode,
-            media_path,
-            &playlist_path,
-            audio_index,
-        ));
+        let mut active_mode = TranscodeMode::CpuLibx264;
+        let mut spawned_child: Option<tokio::process::Child> = None;
 
-        info!(
-            "Spawning FFmpeg transcoding session {} (mode: {:?}, audio: {})",
-            session_id, mode, audio_index
-        );
+        for mode in candidate_modes {
+            let _ = fs::remove_file(&playlist_path);
+            let mut args = vec!["-y".to_string(), "-v".to_string(), "error".to_string()];
+            args.extend(build_ffmpeg_transcode_args(
+                &mode,
+                media_path,
+                &playlist_path,
+                audio_index,
+            ));
 
-        let mut cmd = tokio::process::Command::new(&ffmpeg);
-        cmd.args(&args).kill_on_drop(true);
-        #[cfg(windows)]
-        {
-            cmd.creation_flags(crate::metadata::CREATE_NO_WINDOW);
+            info!(
+                "Spawning FFmpeg transcoding session {} (mode: {:?}, audio: {})",
+                session_id, mode, audio_index
+            );
+
+            let mut cmd = tokio::process::Command::new(&ffmpeg);
+            cmd.args(&args).kill_on_drop(true);
+            #[cfg(windows)]
+            {
+                cmd.creation_flags(crate::metadata::CREATE_NO_WINDOW);
+            }
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Poll until playlist has at least one .ts segment OR child exits early with error
+            let start = Instant::now();
+            let mut ready = false;
+            let mut exited_early = false;
+            while start.elapsed() < Duration::from_secs(10) {
+                if playlist_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&playlist_path) {
+                        if content.contains(".ts") {
+                            ready = true;
+                            break;
+                        }
+                    }
+                }
+                if let Ok(Some(status)) = child.try_wait() {
+                    if !status.success() {
+                        exited_early = true;
+                        break;
+                    }
+                    // Even if status.success() on very short clips, check playlist one more time
+                    if playlist_path.exists() {
+                        ready = true;
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            if ready || !exited_early {
+                active_mode = mode;
+                spawned_child = Some(child);
+                break;
+            } else {
+                let _ = child.start_kill();
+                info!(
+                    "FFmpeg mode {:?} exited early on {}, falling back to next transcode mode...",
+                    mode,
+                    media_path.display()
+                );
+            }
         }
-        let child = cmd
-            .spawn()
-            .map_err(|e| AppError::ProcessError(format!("Failed to spawn FFmpeg: {}", e)))?;
 
         let session = ActiveSession {
             session_id: session_id.clone(),
             media_id: media_id.to_string(),
             media_path: media_path.to_path_buf(),
-            mode: mode.clone(),
+            mode: active_mode.clone(),
             temp_dir,
             active_audio_index: audio_index,
-            child: Some(child),
+            child: spawned_child,
             created_at: Instant::now(),
             last_accessed: Instant::now(),
         };
 
         map.insert(media_id.to_string(), session);
         drop(map);
-
-        // Wait up to 8 seconds (polling every 25ms) for the first HLS segment and playlist to be ready
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(8) {
-            if playlist_path.exists() {
-                if let Ok(content) = fs::read_to_string(&playlist_path) {
-                    if content.contains(".ts") {
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
 
         Ok(HlsStreamInfo {
             session_id,
@@ -171,7 +209,7 @@ impl SessionManager {
                 "/api/stream/{}/index.m3u8?audio={}",
                 media_id, audio_index
             ),
-            mode,
+            mode: active_mode,
             audio_index,
         })
     }
