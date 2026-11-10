@@ -1,0 +1,67 @@
+# User-specified ignores
+.agents/
+logo.png
+/frontend/public/logo.png
+/src-tauri/icons/android/
+/src-tauri/icons/ios/
+/src-tauri/icons/Square*
+/src-tauri/icons/StoreLogo.png
+PROJECT.md
+spec.md
+specs.md
+TEST_INFRA.md
+TEST_READY.md
+tests/
+frontend/verify.mjs
+
+# Build & dependencies
+/target/
+**/target/
+/gen/
+node_modules/
+**/node_modules/
+frontend/dist/
+dist/
+*.tsbuildinfo
+
+# Secrets, env, & private keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+secrets.*
+credentials.*
+*.tauri.key
+
+# Local caches, transcode outputs, & runtime artifacts
+.cache/
+cache/
+posters/
+transcode/
+hls/
+*.m3u8
+*.ts
+*.vtt
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
