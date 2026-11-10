@@ -5,6 +5,11 @@ import { NoiseOverlay } from './components/NoiseOverlay';
 import { Header } from './components/Header';
 import { MediaBrowser } from './components/MediaBrowser';
 import { VideoPlayer } from './components/VideoPlayer';
+import {
+  WatchProgressMap,
+  loadWatchProgress,
+  updateVideoProgressMap,
+} from './utils/watchProgress';
 
 export const App: React.FC = () => {
   const [view, setView] = useState<'browser' | 'player'>('browser');
@@ -14,6 +19,14 @@ export const App: React.FC = () => {
   const [selectedDirectory, setSelectedDirectory] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
+  const [watchProgress, setWatchProgress] = useState<WatchProgressMap>(loadWatchProgress);
+
+  const handleProgressUpdate = useCallback(
+    (mediaId: string, currentTime: number, duration: number) => {
+      setWatchProgress((prev) => updateVideoProgressMap(prev, mediaId, currentTime, duration));
+    },
+    []
+  );
 
   // Fetch initial catalog, server telemetry, and directory
   const loadData = useCallback(async () => {
@@ -122,6 +135,7 @@ export const App: React.FC = () => {
           <MediaBrowser
             items={mediaItems}
             rootDirectory={selectedDirectory}
+            watchProgress={watchProgress}
             onSelectItem={handleSelectItem}
             onTriggerScan={() => handleSelectDirectory()}
             isScanning={isScanning}
@@ -130,6 +144,8 @@ export const App: React.FC = () => {
           <VideoPlayer
             item={selectedItem}
             serverStatus={serverStatus}
+            initialProgress={watchProgress[selectedItem.id]}
+            onProgressUpdate={handleProgressUpdate}
             onBack={handleBackToBrowser}
           />
         ) : null}

@@ -1,11 +1,13 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { MediaItem } from '../types/media';
 import { MediaCard } from './MediaCard';
 import { api } from '../api/client';
+import { WatchProgressMap } from '../utils/watchProgress';
 
 interface MediaBrowserProps {
   items: MediaItem[];
   rootDirectory?: string | null;
+  watchProgress: WatchProgressMap;
   onSelectItem: (item: MediaItem) => void;
   onTriggerScan: () => void;
   isScanning: boolean;
@@ -93,6 +95,7 @@ function formatFileSizeShort(bytes: number): string {
 export const MediaBrowser: React.FC<MediaBrowserProps> = ({
   items,
   rootDirectory,
+  watchProgress,
   onSelectItem,
   onTriggerScan,
   isScanning,
@@ -115,9 +118,45 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
 
   const isSearching = searchQuery.trim().length > 0;
 
+  // Compute average % watched for any directory (empty string = root across all items)
+  const getFolderWatchedPercent = useCallback(
+    (folderRelPath: string): number => {
+      if (items.length === 0) return 0;
+      const targetLower = folderRelPath.toLowerCase();
+      const matching =
+        targetLower === ''
+          ? items
+          : items.filter((it) => {
+              const rel = getRelativeFolderPath(it.file_path, effectiveRoot).toLowerCase();
+              return rel === targetLower || rel.startsWith(targetLower + '/');
+            });
+
+      if (matching.length === 0) return 0;
+      const total = matching.reduce(
+        (sum, it) => sum + (watchProgress[it.id]?.percent ?? 0),
+        0
+      );
+      return Math.round(total / matching.length);
+    },
+    [items, effectiveRoot, watchProgress]
+  );
+
+  const rootWatchedPercent = useMemo(
+    () => getFolderWatchedPercent(''),
+    [getFolderWatchedPercent]
+  );
+
+  const currentFolderWatchedPercent = useMemo(
+    () => getFolderWatchedPercent(currentFolder),
+    [getFolderWatchedPercent, currentFolder]
+  );
+
   // Build top-level & nested folder tree for the collapsible sidebar
   const allFolders = useMemo(() => {
-    const map = new Map<string, { path: string; label: string; depth: number; count: number }>();
+    const map = new Map<
+      string,
+      { path: string; label: string; depth: number; count: number; watchedPercent: number }
+    >();
     for (const item of items) {
       const rel = getRelativeFolderPath(item.file_path, effectiveRoot);
       if (!rel) continue;
@@ -134,12 +173,18 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
             label: parts[i],
             depth: i,
             count: 1,
+            watchedPercent: 0,
           });
         }
       }
     }
-    return Array.from(map.values()).sort((a, b) => naturalCollator.compare(a.path, b.path));
-  }, [items, effectiveRoot]);
+    return Array.from(map.values())
+      .map((f) => ({
+        ...f,
+        watchedPercent: getFolderWatchedPercent(f.path),
+      }))
+      .sort((a, b) => naturalCollator.compare(a.path, b.path));
+  }, [items, effectiveRoot, getFolderWatchedPercent]);
 
   // Filter items by codec and search query
   const filteredItems = useMemo(() => {
@@ -164,7 +209,12 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
         naturalCollator.compare(a.file_name, b.file_name)
       );
       return {
-        childFolders: [] as { name: string; fullRelPath: string; count: number }[],
+        childFolders: [] as {
+          name: string;
+          fullRelPath: string;
+          count: number;
+          watchedPercent: number;
+        }[],
         currentFiles: sorted,
       };
     }
@@ -222,6 +272,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
         name: f.displayName,
         fullRelPath: f.fullRelPath,
         count: f.count,
+        watchedPercent: getFolderWatchedPercent(f.fullRelPath),
       }))
       .sort((a, b) => naturalCollator.compare(a.name, b.name));
 
@@ -230,7 +281,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
     );
 
     return { childFolders: sortedFolders, currentFiles: sortedFiles };
-  }, [filteredItems, currentFolder, effectiveRoot, isSearching]);
+  }, [filteredItems, currentFolder, effectiveRoot, isSearching, getFolderWatchedPercent]);
 
   // Breadcrumb segments
   const breadcrumbs = useMemo(() => {
@@ -274,7 +325,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
         </div>
 
         <div className="toolbar-controls-group">
-          <span style={{ fontSize: '0.78rem', fontWeight: 700 }}>[CODEC]:</span>
+          <span style={{ fontSize: '0.875rem', fontWeight: 700 }}>[CODEC]:</span>
           {['ALL', 'H264', 'HEVC', 'MKV', 'MP4'].map((codec) => (
             <button
               key={codec}
@@ -286,7 +337,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
             </button>
           ))}
 
-          <span style={{ fontSize: '0.78rem', fontWeight: 700, marginLeft: '4px' }}>[VIEW]:</span>
+          <span style={{ fontSize: '0.875rem', fontWeight: 700, marginLeft: '4px' }}>[VIEW]:</span>
           <button
             type="button"
             className={`brutalist-btn sm ${viewMode === 'grid' ? 'active' : ''}`}
@@ -305,6 +356,11 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
           <span className="badge badge-inverted">
             COUNT: {filteredItems.length} / {items.length}
           </span>
+          {items.length > 0 && (
+            <span className="badge badge-inverted">
+              [{currentFolder ? 'DIR' : 'TOTAL'} WATCHED: {currentFolderWatchedPercent}%]
+            </span>
+          )}
         </div>
       </div>
 
@@ -334,11 +390,16 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
             ))}
           </div>
 
-          {currentFolder && (
-            <button type="button" className="brutalist-btn sm" onClick={handleGoUp}>
-              [.. UP ONE LEVEL]
-            </button>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span className="badge badge-inverted">
+              [{currentFolder ? 'DIRECTORY' : 'ROOT'} PROGRESS: {currentFolderWatchedPercent}% WATCHED]
+            </span>
+            {currentFolder && (
+              <button type="button" className="brutalist-btn sm" onClick={handleGoUp}>
+                [.. UP ONE LEVEL]
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -357,7 +418,10 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                 onClick={() => setCurrentFolder('')}
               >
                 <span>[ROOT] /</span>
-                <span className="badge">{items.length}</span>
+                <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                  <span className="badge">{rootWatchedPercent}%</span>
+                  <span className="badge">{items.length}</span>
+                </div>
               </button>
               {allFolders.map((f) => (
                 <button
@@ -368,13 +432,16 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                   }`}
                   style={{ paddingLeft: `${12 + f.depth * 14}px` }}
                   onClick={() => setCurrentFolder(f.path)}
-                  title={f.path}
+                  title={`${f.path} (${f.watchedPercent}% watched)`}
                 >
                   <span className="folder-tree-label">
                     {f.depth > 0 ? '└ ' : '▸ '}
                     {f.label}
                   </span>
-                  <span className="badge">{f.count}</span>
+                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexShrink: 0 }}>
+                    <span className="badge">{f.watchedPercent}%</span>
+                    <span className="badge">{f.count}</span>
+                  </div>
                 </button>
               ))}
             </div>
@@ -401,6 +468,14 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                     }}
                   >
                     <div className="media-card-poster-wrapper">
+                      <div
+                        className={`card-top-right-badge ${
+                          folder.watchedPercent > 0 ? 'watched-active' : ''
+                        }`}
+                        title={`Directory progress: ${folder.watchedPercent}% watched`}
+                      >
+                        [{folder.watchedPercent}% WATCHED]
+                      </div>
                       <div className="media-card-poster-fallback">
                         <div
                           className="poster-fallback-ascii"
@@ -408,9 +483,17 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                         >
                           [DIR]
                         </div>
-                        <div style={{ fontSize: '0.8rem', opacity: 0.85 }}>
+                        <div style={{ fontSize: '0.9rem', opacity: 0.85 }}>
                           {folder.count} {folder.count === 1 ? 'ITEM' : 'ITEMS'}
                         </div>
+                      </div>
+                      <div className="card-progress-bar" aria-hidden="true">
+                        <div
+                          className="card-progress-fill"
+                          style={{
+                            width: `${Math.min(100, Math.max(0, folder.watchedPercent))}%`,
+                          }}
+                        />
                       </div>
                     </div>
                     <div className="media-card-content">
@@ -418,6 +501,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                       <div className="media-card-badges">
                         <span className="badge badge-inverted">DIRECTORY</span>
                         <span className="badge">{folder.count} MEDIA</span>
+                        <span className="badge">[{folder.watchedPercent}% WATCHED]</span>
                       </div>
                     </div>
                   </div>
@@ -425,7 +509,12 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
 
                 {/* Files Second (sorted in natural order) */}
                 {currentFiles.map((item) => (
-                  <MediaCard key={item.id} item={item} onSelect={onSelectItem} />
+                  <MediaCard
+                    key={item.id}
+                    item={item}
+                    watchedPercent={watchProgress[item.id]?.percent ?? 0}
+                    onSelect={onSelectItem}
+                  />
                 ))}
               </div>
             ) : (
@@ -451,7 +540,9 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                       <div className="media-list-sub">PATH: /{folder.fullRelPath}</div>
                     </div>
                     <div className="media-list-meta">
-                      <span className="badge badge-inverted">DIRECTORY</span>
+                      <span className="badge badge-inverted">
+                        [{folder.watchedPercent}% WATCHED]
+                      </span>
                       <span className="badge">{folder.count} ITEMS</span>
                     </div>
                   </div>
@@ -463,6 +554,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                   const res = item.metadata?.height ? `${item.metadata.height}P` : 'UNK';
                   const dur = formatDurationShort(item.metadata?.duration_seconds);
                   const size = formatFileSizeShort(item.file_size_bytes);
+                  const pct = watchProgress[item.id]?.percent ?? 0;
                   return (
                     <div
                       key={item.id}
@@ -493,7 +585,10 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                         <div className="media-list-sub">{size}</div>
                       </div>
                       <div className="media-list-meta">
-                        <span className="badge badge-inverted">[{res}]</span>
+                        <span className={`badge ${pct > 0 ? 'badge-inverted' : ''}`}>
+                          [{pct}% WATCHED]
+                        </span>
+                        <span className="badge">[{res}]</span>
                         <span className="badge">[{dur}]</span>
                         <span className="badge">[{codec}]</span>
                       </div>
@@ -504,12 +599,12 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
             )
           ) : (
             <div className="empty-state">
-              <h2 style={{ fontSize: '1.2rem', fontWeight: 900 }}>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 900 }}>
                 {items.length === 0
                   ? '[NO MEDIA DISCOVERED IN CATALOG]'
                   : '[NO FILES MATCHING ACTIVE FILTER]'}
               </h2>
-              <p style={{ fontSize: '0.85rem', opacity: 0.8 }}>
+              <p style={{ fontSize: '0.9375rem', opacity: 0.85 }}>
                 {items.length === 0
                   ? 'Click [SELECT ROOT DIRECTORY] in the header to point Monolith to your local media folder (.mkv, .mp4, .webm, .avi).'
                   : 'Clear or adjust your search filter query above to display indexed media items.'}

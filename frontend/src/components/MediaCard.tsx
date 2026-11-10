@@ -4,10 +4,15 @@ import { api } from '../api/client';
 
 interface MediaCardProps {
   item: MediaItem;
+  watchedPercent?: number;
   onSelect: (item: MediaItem) => void;
 }
 
-export const MediaCard: React.FC<MediaCardProps> = ({ item, onSelect }) => {
+export const MediaCard: React.FC<MediaCardProps> = ({
+  item,
+  watchedPercent = 0,
+  onSelect,
+}) => {
   const [imageFailed, setImageFailed] = useState(false);
 
   // Format resolution badge
@@ -62,6 +67,13 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, onSelect }) => {
       }}
     >
       <div className="media-card-poster-wrapper">
+        <div
+          className={`card-top-right-badge ${watchedPercent > 0 ? 'watched-active' : ''}`}
+          title={`${watchedPercent}% watched`}
+        >
+          [{watchedPercent}% WATCHED]
+        </div>
+
         {!imageFailed ? (
           <img
             src={posterUrl}
@@ -73,14 +85,21 @@ export const MediaCard: React.FC<MediaCardProps> = ({ item, onSelect }) => {
         ) : (
           <div className="media-card-poster-fallback">
             <span className="poster-fallback-ascii">▶ // ❚❚</span>
-            <span style={{ fontSize: '0.8rem', fontWeight: 900 }}>
+            <span style={{ fontSize: '0.9rem', fontWeight: 900 }}>
               [{item.extension.toUpperCase()}]
             </span>
-            <span style={{ fontSize: '0.65rem', marginTop: '6px', opacity: 0.7 }}>
+            <span style={{ fontSize: '0.875rem', marginTop: '6px', opacity: 0.8 }}>
               {getFileSizeString()}
             </span>
           </div>
         )}
+
+        <div className="card-progress-bar" aria-hidden="true">
+          <div
+            className="card-progress-fill"
+            style={{ width: `${Math.min(100, Math.max(0, watchedPercent))}%` }}
+          />
+        </div>
       </div>
 
       <div className="media-card-content">

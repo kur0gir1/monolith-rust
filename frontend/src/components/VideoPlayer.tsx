@@ -2,10 +2,13 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
 import { MediaItem, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
 import { api } from '../api/client';
+import { VideoProgressEntry } from '../utils/watchProgress';
 
 interface VideoPlayerProps {
   item: MediaItem;
   serverStatus: ServerStatus | null;
+  initialProgress?: VideoProgressEntry;
+  onProgressUpdate?: (mediaId: string, currentTime: number, duration: number) => void;
   onBack: () => void;
 }
 
@@ -55,6 +58,8 @@ function formatTime(secs: number): string {
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   item,
+  initialProgress,
+  onProgressUpdate,
   onBack,
 }) => {
   const stageRef = useRef<HTMLDivElement>(null);
@@ -62,6 +67,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const hlsRef = useRef<Hls | null>(null);
   const seekBarRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number | null>(null);
+  const initialResumeRef = useRef<number>(
+    initialProgress && initialProgress.currentTime > 5 && initialProgress.percent < 96
+      ? initialProgress.currentTime
+      : 0
+  );
 
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number>(() => {
     return item.metadata?.audio_tracks?.[0]?.index ?? 0;
@@ -215,8 +225,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const initialAudio = item.metadata?.audio_tracks?.[0]?.index ?? 0;
     setSelectedAudioIndex(initialAudio);
     setDuration(item.metadata?.duration_seconds ?? 0);
-    setCurrentTime(0);
-    initStream(initialAudio, 0);
+    const startAt = initialResumeRef.current;
+    setCurrentTime(startAt);
+    initStream(initialAudio, startAt);
 
     return () => {
       if (hlsRef.current) {
@@ -237,9 +248,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setControlsVisible(true);
     };
     const onTimeUpdate = () => {
-      setCurrentTime(video.currentTime);
+      const cur = video.currentTime;
+      setCurrentTime(cur);
       if (video.buffered.length > 0) {
         setBufferedEnd(video.buffered.end(video.buffered.length - 1));
+      }
+      const metaDur = item.metadata?.duration_seconds ?? 0;
+      const vidDur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const effDur = Math.max(metaDur, vidDur);
+      if (effDur > 0 && cur > 1) {
+        onProgressUpdate?.(item.id, cur, effDur);
       }
     };
     const onDurationChange = () => {
@@ -265,7 +283,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.removeEventListener('durationchange', onDurationChange);
       video.removeEventListener('volumechange', onVolumeChange);
     };
-  }, [item.metadata?.duration_seconds]);
+  }, [item.id, item.metadata?.duration_seconds, onProgressUpdate]);
 
   // Sync fullscreen state
   useEffect(() => {
@@ -590,6 +608,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </div>
             </div>
             <div className="player-header-badges">
+              <span className="badge badge-inverted">
+                [{Math.round(progressPercent)}% WATCHED]
+              </span>
               <span className="badge">[{streamStatus}]</span>
               <button
                 type="button"
@@ -889,8 +910,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               className="hud-error-box"
               onClick={(e) => e.stopPropagation()}
             >
-              <h3 style={{ fontSize: '1rem', marginBottom: '8px' }}>[STREAM ERROR]</h3>
-              <p style={{ fontSize: '0.8rem' }}>{playerError}</p>
+              <h3 style={{ fontSize: '1.1rem', marginBottom: '8px' }}>[STREAM ERROR]</h3>
+              <p style={{ fontSize: '0.9rem' }}>{playerError}</p>
               <button
                 type="button"
                 className="brutalist-btn badge-inverted"

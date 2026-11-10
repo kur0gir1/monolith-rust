@@ -102,8 +102,8 @@ export const Header: React.FC<HeaderProps> = ({
       {showPathModal && (
         <div className="modal-overlay" onClick={() => setShowPathModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ fontSize: '1rem', fontWeight: 900 }}>[ENTER SERVER MEDIA DIRECTORY]</h3>
-            <p style={{ fontSize: '0.8rem', opacity: 0.8 }}>
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 900 }}>[ENTER SERVER MEDIA DIRECTORY]</h3>
+            <p style={{ fontSize: '0.9rem', opacity: 0.85 }}>
               Enter the absolute path on the host server to scan for media files (.mkv, .mp4, .webm, .avi). Leave empty to use default.
             </p>
             <form onSubmit={handleManualSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
