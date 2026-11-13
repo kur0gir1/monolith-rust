@@ -266,7 +266,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       // Quantize FFmpeg start offsets to 4s buckets so desktop host & mobile peers share one transcoder
       const startOffset = resumeTime >= 4 ? Math.floor(resumeTime / 4) * 4 : 0;
-      const localResume = Math.max(0, resumeTime - startOffset);
       const gen = ++streamGenRef.current;
       streamOffsetRef.current = startOffset;
       isStreamReadyRef.current = false;
@@ -283,12 +282,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (Hls.isSupported()) {
         let fatalNetworkRetries = 0;
         let fatalMediaRetries = 0;
+        let lastStallKickAt = 0;
 
         const hls = new Hls({
-          enableWorker: false,
+          enableWorker: true,
           lowLatencyMode: false,
           startFragPrefetch: true,
-          startPosition: localResume >= 0.5 ? localResume : -1,
           maxBufferLength: 30,
           backBufferLength: 30,
           manifestLoadingTimeOut: 30000,
@@ -315,6 +314,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (streamGenRef.current !== gen) return;
           setStreamStatus('BUFFERING...');
+          if (startOffset === 0 && resumeTime > 0 && resumeTime < 4) {
+            video.currentTime = resumeTime;
+          }
           const shouldPlay = desirePlayingRef.current !== false;
           desirePlayingRef.current = null;
           if (shouldPlay) {
@@ -330,12 +332,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             isStreamReadyRef.current = true;
             streamReadyAtRef.current = Date.now();
           }
+          if (video.paused && video.currentTime === 0 && video.buffered.length > 0 && video.buffered.end(0) > 0.1) {
+            video.currentTime = Math.min(0.05, video.buffered.start(0) + 0.02);
+          }
           setStreamStatus((prev) =>
             prev === 'TAP PLAY ▶' ? prev : autoplayMutedRef.current ? 'MUTED (TAP SOUND)' : 'STREAMING'
           );
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (streamGenRef.current !== gen) return;
+          if (!data.fatal) {
+            if (
+              data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR &&
+              !video.paused &&
+              Date.now() - lastStallKickAt > 2500
+            ) {
+              lastStallKickAt = Date.now();
+              hls.startLoad();
+            }
+            return;
+          }
           if (data.fatal) {
             console.error('Fatal HLS error encountered:', data);
             switch (data.type) {
@@ -379,14 +396,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         const ac = new AbortController();
         nativeCleanupRef.current = () => ac.abort();
-        let appliedLocalResume = localResume < 0.5;
-
-        const tryNativeResumeSeek = () => {
-          if (!appliedLocalResume && isLocalTimeSeekable(video, localResume)) {
-            video.currentTime = localResume;
-            appliedLocalResume = true;
-          }
-        };
 
         const startOrPauseNative = () => {
           const shouldPlay = desirePlayingRef.current !== false;
@@ -407,7 +416,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           () => {
             if (streamGenRef.current !== gen) return;
             setStreamStatus('BUFFERING...');
-            tryNativeResumeSeek();
+            if (startOffset === 0 && resumeTime > 0 && resumeTime < 4) {
+              video.currentTime = resumeTime;
+            }
             startOrPauseNative();
           },
           { signal: ac.signal }
@@ -415,10 +426,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
         const markNativeReady = () => {
           if (streamGenRef.current !== gen) return;
-          tryNativeResumeSeek();
           if (!isStreamReadyRef.current) {
             isStreamReadyRef.current = true;
             streamReadyAtRef.current = Date.now();
+          }
+          if (video.paused && video.currentTime === 0 && video.buffered.length > 0 && video.buffered.end(0) > 0.1) {
+            video.currentTime = Math.min(0.05, video.buffered.start(0) + 0.02);
           }
           setStreamStatus((prev) =>
             prev === 'TAP PLAY ▶' ? prev : autoplayMutedRef.current ? 'MUTED (TAP SOUND)' : 'STREAMING'
@@ -1241,6 +1254,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             onClick={() => {
               if (activePopover !== 'none') {
                 setActivePopover('none');
+              } else if (autoplayMutedRef.current && videoRef.current && !videoRef.current.paused) {
+                handleUnmuteAutoplay();
               } else {
                 togglePlay();
               }
