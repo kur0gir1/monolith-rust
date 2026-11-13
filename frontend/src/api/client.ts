@@ -296,11 +296,6 @@ export class ApiClient {
     if (!res.ok) {
       throw new Error(`Failed to kill tunnel: HTTP ${res.status}`);
     }
-    try {
-      await this.resetParty();
-    } catch (err) {
-      console.warn('Failed to reset party on kill tunnel:', err);
-    }
     return res.json();
   }
 

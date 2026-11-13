@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback, useMemo, Suspense, lazy } from 'react';
-import { MediaItem, PartyState, ServerStatus } from './types/media';
+import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
+import { MediaItem, PartyState, ServerStatus, TunnelStatus } from './types/media';
 import { api, setInviteTokenManual } from './api/client';
 import { NoiseOverlay } from './components/NoiseOverlay';
 import { Header } from './components/Header';
@@ -26,6 +26,7 @@ export const App: React.FC = () => {
   const [partyState, setPartyState] = useState<PartyState | null>(null);
   const [needsInviteAuth, setNeedsInviteAuth] = useState(false);
   const [inviteInput, setInviteInput] = useState('');
+  const syncEpochRef = useRef(0);
 
   const handleProgressUpdate = useCallback(
     (mediaId: string, currentTime: number, duration: number) => {
@@ -67,17 +68,27 @@ export const App: React.FC = () => {
 
     // Periodic telemetry ping every 8s
     const statusInterval = setInterval(() => {
+      const epoch = syncEpochRef.current;
       api
         .getServerStatus()
-        .then((s) => setServerStatus(s))
+        .then((s) => {
+          if (syncEpochRef.current === epoch) {
+            setServerStatus(s);
+          }
+        })
         .catch(() => {});
     }, 8000);
 
     // Watch Party heartbeat & state sync every 1.2s
     const partyInterval = setInterval(() => {
+      const epoch = syncEpochRef.current;
       api
         .getPartyState()
-        .then((p) => setPartyState(p))
+        .then((p) => {
+          if (syncEpochRef.current === epoch) {
+            setPartyState(p);
+          }
+        })
         .catch(() => {});
     }, 1200);
 
@@ -118,15 +129,17 @@ export const App: React.FC = () => {
   const handleSelectItem = (item: MediaItem) => {
     setSelectedItem(item);
     setView('player');
-    api
-      .updatePartyState({
-        media_id: item.id,
-        media_title: item.file_name,
-        is_playing: true,
-        current_time: watchProgress[item.id]?.currentTime ?? 0,
-      })
-      .then((p) => setPartyState(p))
-      .catch(() => {});
+    if (partyState?.enabled || serverStatus?.tunnel?.active) {
+      api
+        .updatePartyState({
+          media_id: item.id,
+          media_title: item.file_name,
+          is_playing: true,
+          current_time: watchProgress[item.id]?.currentTime ?? 0,
+        })
+        .then((p) => setPartyState(p))
+        .catch(() => {});
+    }
   };
 
   const handleJoinPartyMedia = () => {
@@ -166,27 +179,45 @@ export const App: React.FC = () => {
     await loadData();
   };
 
-  const handleKillTunnel = useCallback(async () => {
+  const handleKillTunnel = useCallback(() => {
+    syncEpochRef.current += 1;
     setPartyState(null);
-    try {
-      await api.resetParty();
-    } catch (err) {
-      console.warn('Failed to reset party on kill tunnel:', err);
-    }
+  }, []);
+
+  const handlePartyStateChange = useCallback((state: PartyState | null) => {
+    syncEpochRef.current += 1;
+    setPartyState(state);
+  }, []);
+
+  const handleTunnelStatusChange = useCallback((tunnel: TunnelStatus) => {
+    syncEpochRef.current += 1;
+    setServerStatus((prev) =>
+      prev
+        ? { ...prev, tunnel }
+        : {
+            lan_ip: '127.0.0.1',
+            port: 9000,
+            gpu_available: false,
+            transcoder: 'CPU LIBX264',
+            tunnel,
+          }
+    );
   }, []);
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${view === 'player' ? 'player-mode' : ''}`}>
       {/* Global Grainy SVG Terminal Noise Overlay */}
       <NoiseOverlay />
 
-      {/* Modern Header */}
+      {/* Cyber-Sigil Brutalist Header */}
       <Header
         serverStatus={serverStatus}
         selectedDirectory={selectedDirectory}
         onSelectDirectory={handleSelectDirectory}
         isScanning={isScanning}
         partyState={partyState}
+        onPartyStateChange={handlePartyStateChange}
+        onTunnelStatusChange={handleTunnelStatusChange}
         onKillTunnel={handleKillTunnel}
       />
 
@@ -233,18 +264,18 @@ export const App: React.FC = () => {
 
             {/* Watch Party Live Banner when someone is watching a video */}
             {view === 'browser' &&
+              partyState?.enabled &&
               partyState?.media_id &&
               (partyState.is_playing || partyState.active_peers > 1) &&
               mediaItems.some((m) => m.id === partyState.media_id) && (
                 <div className="party-live-banner">
                   <div className="party-live-banner-content">
-                    <span className="live-indicator-dot" aria-hidden="true" />
                     <span className="badge badge-inverted">
-                      WATCH PARTY LIVE
+                      [WATCH PARTY LIVE]
                     </span>
                     <strong className="party-media-title">{partyState.media_title || 'SHARED STREAM'}</strong>
                     <span className="party-status-time">
-                      ({partyState.is_playing ? 'PLAYING' : 'PAUSED'} •{' '}
+                      ({partyState.is_playing ? 'PLAYING' : 'PAUSED'} //{' '}
                       {Math.floor(partyState.current_time / 60)}:
                       {Math.floor(partyState.current_time % 60)
                         .toString()
@@ -257,7 +288,7 @@ export const App: React.FC = () => {
                     className="brutalist-btn sm active"
                     onClick={handleJoinPartyMedia}
                   >
-                    JOIN STREAM NOW ▶
+                    [JOIN STREAM NOW ▶]
                   </button>
                 </div>
               )}
@@ -286,6 +317,7 @@ export const App: React.FC = () => {
                   key={selectedItem.id}
                   item={selectedItem}
                   serverStatus={serverStatus}
+                  partyState={partyState}
                   initialProgress={watchProgress[selectedItem.id]}
                   onProgressUpdate={handleProgressUpdate}
                   onBack={handleBackToBrowser}

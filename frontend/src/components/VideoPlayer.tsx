@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import Hls from 'hls.js';
-import { ChapterMarker, MediaItem, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
+import { ChapterMarker, MediaItem, PartyState, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
 import { api, getPeerId } from '../api/client';
 import { VideoProgressEntry, WatchProgressMap } from '../utils/watchProgress';
 
 interface VideoPlayerProps {
   item: MediaItem;
   serverStatus: ServerStatus | null;
+  partyState?: PartyState | null;
   initialProgress?: VideoProgressEntry;
   onProgressUpdate?: (mediaId: string, currentTime: number, duration: number) => void;
   onBack: () => void;
@@ -64,6 +65,8 @@ function formatTime(secs: number): string {
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   item,
+  serverStatus,
+  partyState,
   initialProgress,
   onProgressUpdate,
   onBack,
@@ -106,6 +109,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [activePeers, setActivePeers] = useState<number>(1);
   const [isSyncingParty, setIsSyncingParty] = useState<boolean>(false);
   const lastAppliedSeqRef = useRef<number>(0);
+  const isWatchPartyActive = Boolean(serverStatus?.tunnel?.active || partyState?.enabled);
+  const displayPeers = Math.max(activePeers, partyState?.active_peers ?? 1);
+  const serverPartyEnabledRef = useRef<boolean>(isWatchPartyActive);
+
+  useEffect(() => {
+    serverPartyEnabledRef.current = isWatchPartyActive;
+  }, [isWatchPartyActive]);
 
   // Custom HUD transport state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -327,7 +337,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.removeEventListener('durationchange', onDurationChange);
       video.removeEventListener('volumechange', onVolumeChange);
     };
-  }, [item.id, item.metadata?.duration_seconds, onProgressUpdate]);
+  }, [item.id, item.metadata?.duration_seconds, onProgressUpdate, autoNext, nextItem, onSelectItem]);
 
   // Sync fullscreen state
   useEffect(() => {
@@ -340,7 +350,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const broadcastPartyUpdate = useCallback(
     (playing: boolean, timeSec: number) => {
-      if (!partySyncEnabled) return;
+      if (!partySyncEnabled || !serverPartyEnabledRef.current) return;
       api
         .updatePartyState({
           media_id: item.id,
@@ -359,13 +369,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Poll Watch Party state for shared-control playback synchronization
   useEffect(() => {
-    if (!partySyncEnabled) return;
+    if (!partySyncEnabled || !isWatchPartyActive) return;
     const myPeerId = getPeerId();
 
     const syncInterval = window.setInterval(async () => {
       try {
         const party = await api.getPartyState();
+        serverPartyEnabledRef.current = party.enabled;
         setActivePeers(party.active_peers);
+        if (!party.enabled) return;
+
+        // If Watch Party was just toggled on while this video is open, register this media item
+        if (!party.media_id && videoRef.current) {
+          broadcastPartyUpdate(!videoRef.current.paused, videoRef.current.currentTime);
+          return;
+        }
 
         if (party.media_id !== item.id) return;
         const video = videoRef.current;
@@ -398,7 +416,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 1000);
 
     return () => window.clearInterval(syncInterval);
-  }, [partySyncEnabled, item.id]);
+  }, [partySyncEnabled, isWatchPartyActive, item.id, broadcastPartyUpdate]);
 
   const handleRefreshParty = useCallback(async () => {
     setIsSyncingParty(true);
@@ -823,24 +841,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   [{Math.round(progressPercent)}% WATCHED]
                 </span>
                 <span className="badge">[{streamStatus}]</span>
-                <button
-                  type="button"
-                  className={`brutalist-btn sm ${partySyncEnabled ? 'active' : ''}`}
-                  onClick={() => setPartySyncEnabled((v) => !v)}
-                  title="Synchronize Play, Pause, and Seek with Watch Party viewers"
-                >
-                  [PARTY SYNC: {partySyncEnabled ? `ON (${activePeers})` : 'OFF'}]
-                </button>
-                {partySyncEnabled && (
-                  <button
-                    type="button"
-                    className="brutalist-btn sm"
-                    onClick={handleRefreshParty}
-                    disabled={isSyncingParty}
-                    title="Manually poll and align playback with Watch Party peers"
-                  >
-                    {isSyncingParty ? '[SYNCING...]' : '[REFRESH SYNC ⟳]'}
-                  </button>
+                {isWatchPartyActive && (
+                  <>
+                    <button
+                      type="button"
+                      className={`brutalist-btn sm ${partySyncEnabled ? 'active' : ''}`}
+                      onClick={() => setPartySyncEnabled((v) => !v)}
+                      title="Synchronize Play, Pause, and Seek with Watch Party viewers"
+                    >
+                      [PARTY SYNC: {partySyncEnabled ? `ON (${displayPeers})` : 'OFF'}]
+                    </button>
+                    {partySyncEnabled && (
+                      <button
+                        type="button"
+                        className="brutalist-btn sm"
+                        onClick={handleRefreshParty}
+                        disabled={isSyncingParty}
+                        title="Manually poll and align playback with Watch Party peers"
+                      >
+                        {isSyncingParty ? '[SYNCING...]' : '[REFRESH SYNC ⟳]'}
+                      </button>
+                    )}
+                  </>
                 )}
                 {showPlaylist && (
                   <>

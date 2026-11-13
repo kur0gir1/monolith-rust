@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -78,11 +78,13 @@ struct TunnelInner {
     invite_token: String,
     error: Option<String>,
     child: Option<Child>,
+    attempt_id: u64,
 }
 
 #[derive(Clone)]
 pub struct TunnelManager {
     inner: Arc<RwLock<TunnelInner>>,
+    status_tx: Arc<watch::Sender<u64>>,
 }
 
 impl Default for TunnelManager {
@@ -93,6 +95,7 @@ impl Default for TunnelManager {
 
 impl TunnelManager {
     pub fn new() -> Self {
+        let (status_tx, _) = watch::channel(0u64);
         Self {
             inner: Arc::new(RwLock::new(TunnelInner {
                 active: false,
@@ -102,8 +105,22 @@ impl TunnelManager {
                 invite_token: Uuid::new_v4().simple().to_string(),
                 error: None,
                 child: None,
+                attempt_id: 0,
             })),
+            status_tx: Arc::new(status_tx),
         }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.status_tx.subscribe()
+    }
+
+    fn notify_status_change(&self) {
+        self.status_tx.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    pub async fn attempt_id(&self) -> u64 {
+        self.inner.read().await.attempt_id
     }
 
     pub async fn get_status(&self) -> TunnelStatus {
@@ -143,6 +160,7 @@ impl TunnelManager {
     pub async fn stop(&self) -> TunnelStatus {
         {
             let mut guard = self.inner.write().await;
+            guard.attempt_id = guard.attempt_id.wrapping_add(1);
             if let Some(mut child) = guard.child.take() {
                 let _ = child.start_kill();
             }
@@ -151,12 +169,14 @@ impl TunnelManager {
             guard.public_url = None;
             guard.error = None;
         }
+        self.notify_status_change();
         self.get_status().await
     }
 
     pub async fn kill(&self) -> TunnelStatus {
         {
             let mut guard = self.inner.write().await;
+            guard.attempt_id = guard.attempt_id.wrapping_add(1);
             if let Some(mut child) = guard.child.take() {
                 let _ = child.start_kill();
             }
@@ -167,6 +187,7 @@ impl TunnelManager {
             // Invalidate invite token immediately so any existing link becomes invalid
             guard.invite_token = Uuid::new_v4().simple().to_string();
         }
+        self.notify_status_change();
         self.get_status().await
     }
 
@@ -174,14 +195,22 @@ impl TunnelManager {
         // Stop any existing tunnel first
         self.stop().await;
 
-        {
+        let my_attempt_id = {
             let mut guard = self.inner.write().await;
+            guard.attempt_id = guard.attempt_id.wrapping_add(1);
             guard.provider = provider.clone();
             guard.status = "CONNECTING".to_string();
             guard.active = true;
             guard.error = None;
             guard.public_url = None;
-        }
+            guard.attempt_id
+        };
+
+        let known_hosts_null = if cfg!(windows) {
+            "UserKnownHostsFile=NUL"
+        } else {
+            "UserKnownHostsFile=/dev/null"
+        };
 
         let mut cmd = match provider {
             TunnelProvider::LocalhostRun => {
@@ -190,7 +219,7 @@ impl TunnelManager {
                     "-o",
                     "StrictHostKeyChecking=no",
                     "-o",
-                    "UserKnownHostsFile=NUL",
+                    known_hosts_null,
                     "-o",
                     "BatchMode=yes",
                     "-o",
@@ -208,7 +237,7 @@ impl TunnelManager {
                     "-o",
                     "StrictHostKeyChecking=no",
                     "-o",
-                    "UserKnownHostsFile=NUL",
+                    known_hosts_null,
                     "-o",
                     "BatchMode=yes",
                     "-o",
@@ -253,15 +282,21 @@ impl TunnelManager {
 
                 if let Some(out) = stdout {
                     let inner_clone = self.inner.clone();
+                    let tx_clone = self.status_tx.clone();
                     tokio::spawn(async move {
                         let mut reader = BufReader::new(out).lines();
                         while let Ok(Some(line)) = reader.next_line().await {
                             if let Some(url) = extract_https_url(&line) {
-                                info!("Encrypted public tunnel established: {}", url);
                                 let mut g = inner_clone.write().await;
+                                if g.attempt_id != my_attempt_id {
+                                    break;
+                                }
+                                info!("Encrypted public tunnel established: {}", url);
                                 g.public_url = Some(url);
                                 g.status = "ONLINE".to_string();
                                 g.error = None;
+                                drop(g);
+                                tx_clone.send_modify(|v| *v = v.wrapping_add(1));
                             }
                         }
                     });
@@ -269,39 +304,76 @@ impl TunnelManager {
 
                 if let Some(err) = stderr {
                     let inner_clone = self.inner.clone();
+                    let tx_clone = self.status_tx.clone();
                     tokio::spawn(async move {
                         let mut reader = BufReader::new(err).lines();
                         while let Ok(Some(line)) = reader.next_line().await {
                             if let Some(url) = extract_https_url(&line) {
-                                info!("Encrypted public tunnel established (stderr): {}", url);
                                 let mut g = inner_clone.write().await;
+                                if g.attempt_id != my_attempt_id {
+                                    break;
+                                }
+                                info!("Encrypted public tunnel established (stderr): {}", url);
                                 g.public_url = Some(url);
                                 g.status = "ONLINE".to_string();
                                 g.error = None;
+                                drop(g);
+                                tx_clone.send_modify(|v| *v = v.wrapping_add(1));
                             } else if line.to_lowercase().contains("permission denied")
                                 || line.to_lowercase().contains("connection refused")
                             {
                                 warn!("Tunnel stderr warning: {}", line);
                                 let mut g = inner_clone.write().await;
+                                if g.attempt_id != my_attempt_id {
+                                    break;
+                                }
                                 if g.public_url.is_none() {
                                     g.status = "ERROR".to_string();
                                     g.active = false;
                                     g.error = Some(line);
+                                    drop(g);
+                                    tx_clone.send_modify(|v| *v = v.wrapping_add(1));
                                 }
                             }
+                        }
+                        let mut g = inner_clone.write().await;
+                        if g.attempt_id == my_attempt_id
+                            && (g.status == "CONNECTING" || g.status == "ONLINE")
+                        {
+                            let was_online = g.status == "ONLINE";
+                            g.status = "ERROR".to_string();
+                            g.active = false;
+                            g.public_url = None;
+                            if g.error.is_none() {
+                                g.error = Some(if was_online {
+                                    "Tunnel process exited unexpectedly.".to_string()
+                                } else {
+                                    "Tunnel process exited before establishing a public URL."
+                                        .to_string()
+                                });
+                            }
+                            drop(g);
+                            tx_clone.send_modify(|v| *v = v.wrapping_add(1));
                         }
                     });
                 }
             }
             Err(e) => {
-                let mut guard = self.inner.write().await;
-                guard.active = false;
-                guard.status = "ERROR".to_string();
-                guard.error = Some(format!(
-                    "Failed to launch {} binary ({}). Try LOCALHOST.RUN or install cloudflared.",
-                    provider.label(),
-                    e
-                ));
+                if provider == TunnelProvider::Cloudflare {
+                    warn!("cloudflared binary failed to launch ({}), auto-falling back to LOCALHOST.RUN SSH tunnel", e);
+                    return Box::pin(self.start(TunnelProvider::LocalhostRun, local_port)).await;
+                }
+                {
+                    let mut guard = self.inner.write().await;
+                    guard.active = false;
+                    guard.status = "ERROR".to_string();
+                    guard.error = Some(format!(
+                        "Failed to launch {} binary ({}). Try LOCALHOST.RUN or install cloudflared.",
+                        provider.label(),
+                        e
+                    ));
+                }
+                self.notify_status_change();
             }
         }
 
@@ -365,6 +437,24 @@ mod tests {
         assert_ne!(killed.invite_token, initial_token);
         assert!(!mgr.verify_token(Some(&initial_token)).await);
         assert!(mgr.verify_token(Some(&killed.invite_token)).await);
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_attempt_id_and_subscribe_on_stop_kill() {
+        let mgr = TunnelManager::new();
+        let mut rx = mgr.subscribe();
+        let id0 = mgr.attempt_id().await;
+
+        mgr.stop().await;
+        assert!(rx.has_changed().unwrap_or(false));
+        let _ = rx.borrow_and_update();
+        let id1 = mgr.attempt_id().await;
+        assert!(id1 > id0);
+
+        mgr.kill().await;
+        assert!(rx.has_changed().unwrap_or(false));
+        let id2 = mgr.attempt_id().await;
+        assert!(id2 > id1);
     }
 
     #[test]

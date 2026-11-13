@@ -221,7 +221,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
 
       return matchesSearch && matchesCodec;
     });
-  }, [items, searchQuery, filterCodec]);
+  }, [items, effectiveRoot, searchQuery, filterCodec]);
 
   // Compute immediate child folders and files for the current folder view
   const { childFolders, currentFiles } = useMemo(() => {
@@ -322,7 +322,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
 
   return (
     <div className="browser-container">
-      {/* Toolbar */}
+      {/* Unified Compact Cyber-Sigil Toolbar + Path Trail */}
       <div className="browser-toolbar">
         <div className="search-input-wrapper">
           {allFolders.length > 0 && (
@@ -332,21 +332,50 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
               onClick={() => setSidebarOpen((v) => !v)}
               title="Toggle Folder Tree Sidebar"
             >
-              [DIRS: {sidebarOpen ? 'HIDE' : 'SHOW'}]
+              [✦ DIRS: {sidebarOpen ? 'ON' : 'OFF'}]
             </button>
           )}
-          <span style={{ fontWeight: 900 }}>[FILTER]:</span>
+          {currentFolder && !isSearching && (
+            <div className="breadcrumb-trail">
+              <button
+                type="button"
+                className="brutalist-btn sm"
+                onClick={handleGoUp}
+                title="Go up one folder level"
+              >
+                [↑ UP]
+              </button>
+              <button
+                type="button"
+                className="brutalist-btn sm"
+                onClick={() => setCurrentFolder('')}
+              >
+                [ROOT]
+              </button>
+              {breadcrumbs.map((crumb) => (
+                <React.Fragment key={crumb.path}>
+                  <span className="sigil-sep">/</span>
+                  <button
+                    type="button"
+                    className={`brutalist-btn sm ${currentFolder === crumb.path ? 'active' : ''}`}
+                    onClick={() => setCurrentFolder(crumb.path)}
+                  >
+                    [{crumb.name}]
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
           <input
             type="text"
             className="search-input"
-            placeholder="SEARCH BY FILE NAME..."
+            placeholder="⌖ FILTER CATALOG..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
 
         <div className="toolbar-controls-group">
-          <span className="status-label">[CODEC]:</span>
           {['ALL', 'H264', 'HEVC', 'MKV', 'MP4'].map((codec) => (
             <button
               key={codec}
@@ -358,71 +387,31 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
             </button>
           ))}
 
-          <span className="status-label" style={{ marginLeft: '4px' }}>[VIEW]:</span>
           <button
             type="button"
             className={`brutalist-btn sm ${viewMode === 'grid' ? 'active' : ''}`}
             onClick={() => setViewMode('grid')}
           >
-            [GRID]
+            [⊞ GRID]
           </button>
           <button
             type="button"
             className={`brutalist-btn sm ${viewMode === 'list' ? 'active' : ''}`}
             onClick={() => setViewMode('list')}
           >
-            [LIST]
+            [≡ LIST]
           </button>
 
           <span className="badge badge-inverted">
-            COUNT: {filteredItems.length} / {items.length}
+            {filteredItems.length}/{items.length}
           </span>
-          {items.length > 0 && (
-            <span className="badge badge-inverted">
-              [{currentFolder ? 'DIR' : 'TOTAL'} WATCHED: {currentFolderWatchedPercent}%]
+          {items.length > 0 && currentFolderWatchedPercent > 0 && (
+            <span className="badge">
+              {currentFolderWatchedPercent}% WATCHED
             </span>
           )}
         </div>
       </div>
-
-      {/* Folder Breadcrumb Bar */}
-      {items.length > 0 && !isSearching && (
-        <div className="breadcrumb-bar">
-          <div className="breadcrumb-trail">
-            <span style={{ fontWeight: 900, marginRight: '4px' }}>[PATH]:</span>
-            <button
-              type="button"
-              className={`brutalist-btn sm ${currentFolder === '' ? 'active' : ''}`}
-              onClick={() => setCurrentFolder('')}
-            >
-              [ROOT]
-            </button>
-            {breadcrumbs.map((crumb) => (
-              <React.Fragment key={crumb.path}>
-                <span style={{ fontWeight: 900 }}>/</span>
-                <button
-                  type="button"
-                  className={`brutalist-btn sm ${currentFolder === crumb.path ? 'active' : ''}`}
-                  onClick={() => setCurrentFolder(crumb.path)}
-                >
-                  [{crumb.name}]
-                </button>
-              </React.Fragment>
-            ))}
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <span className="badge badge-inverted">
-              [{currentFolder ? 'DIRECTORY' : 'ROOT'} PROGRESS: {currentFolderWatchedPercent}% WATCHED]
-            </span>
-            {currentFolder && (
-              <button type="button" className="brutalist-btn sm" onClick={handleGoUp}>
-                [.. UP ONE LEVEL]
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Industrial Terminal Workspace: Collapsible Folder Sidebar + Fluid Content Area */}
       <div className="browser-workspace">
@@ -440,7 +429,9 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
               >
                 <span>[ROOT] /</span>
                 <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                  <span className="badge">{rootWatchedPercent}%</span>
+                  {rootWatchedPercent > 0 && (
+                    <span className="badge">{rootWatchedPercent}%</span>
+                  )}
                   <span className="badge">{items.length}</span>
                 </div>
               </button>
@@ -453,14 +444,16 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                   }`}
                   style={{ paddingLeft: `${12 + f.depth * 14}px` }}
                   onClick={() => setCurrentFolder(f.path)}
-                  title={`${f.path} (${f.watchedPercent}% watched)`}
+                  title={`${f.path}${f.watchedPercent > 0 ? ` (${f.watchedPercent}% watched)` : ''}`}
                 >
                   <span className="folder-tree-label">
                     {f.depth > 0 ? '└ ' : '▸ '}
                     {f.label}
                   </span>
                   <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexShrink: 0 }}>
-                    <span className="badge">{f.watchedPercent}%</span>
+                    {f.watchedPercent > 0 && (
+                      <span className="badge">{f.watchedPercent}%</span>
+                    )}
                     <span className="badge">{f.count}</span>
                   </div>
                 </button>
@@ -472,72 +465,52 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
         <div className="browser-content-pane">
           {childFolders.length > 0 || currentFiles.length > 0 ? (
             viewMode === 'grid' ? (
-              <div className="media-grid">
-                {/* Folders First (sorted in natural order) */}
-                {childFolders.map((folder) => (
-                  <div
-                    key={`folder:${folder.fullRelPath}`}
-                    className="media-card folder-card"
-                    onClick={() => setCurrentFolder(folder.fullRelPath)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        setCurrentFolder(folder.fullRelPath);
-                      }
-                    }}
-                  >
-                    <div className="media-card-poster-wrapper">
-                      <div
-                        className={`card-top-right-badge ${
-                          folder.watchedPercent > 0 ? 'watched-active' : ''
-                        }`}
-                        title={`Directory progress: ${folder.watchedPercent}% watched`}
+              <>
+                {/* Compact High-Density Directory Strip Tiles (1-row chips above video posters) */}
+                {childFolders.length > 0 && (
+                  <div className="folder-strip-grid" aria-label="Subdirectories">
+                    {childFolders.map((folder) => (
+                      <button
+                        key={`folder:${folder.fullRelPath}`}
+                        type="button"
+                        className="folder-strip-tile"
+                        onClick={() => setCurrentFolder(folder.fullRelPath)}
+                        title={`${folder.name} (${folder.count} items${folder.watchedPercent > 0 ? `, ${folder.watchedPercent}% watched` : ''})`}
                       >
-                        [{folder.watchedPercent}% WATCHED]
-                      </div>
-                      <div className="media-card-poster-fallback">
-                        <div
-                          className="poster-fallback-ascii"
-                          style={{ fontSize: '2.4rem', fontWeight: 900 }}
-                        >
-                          [DIR]
-                        </div>
-                        <div style={{ fontSize: '0.9rem', opacity: 0.85 }}>
-                          {folder.count} {folder.count === 1 ? 'ITEM' : 'ITEMS'}
-                        </div>
-                      </div>
-                      <div className="card-progress-bar" aria-hidden="true">
-                        <div
-                          className="card-progress-fill"
-                          style={{
-                            width: `${Math.min(100, Math.max(0, folder.watchedPercent))}%`,
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <div className="media-card-content">
-                      <div className="media-card-title">[FOLDER] {folder.name}</div>
-                      <div className="media-card-badges">
-                        <span className="badge badge-inverted">DIRECTORY</span>
-                        <span className="badge">{folder.count} MEDIA</span>
-                        <span className="badge">[{folder.watchedPercent}% WATCHED]</span>
-                      </div>
-                    </div>
+                        <span className="folder-strip-icon" aria-hidden="true">◈</span>
+                        <span className="folder-strip-name">{folder.name}</span>
+                        <span className="folder-strip-meta">
+                          {folder.watchedPercent > 0 && (
+                            <span className="badge badge-inverted">{folder.watchedPercent}%</span>
+                          )}
+                          <span className="badge">{folder.count}</span>
+                        </span>
+                        {folder.watchedPercent > 0 && (
+                          <span
+                            className="folder-strip-progress"
+                            style={{ width: `${Math.min(100, Math.max(0, folder.watchedPercent))}%` }}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    ))}
                   </div>
-                ))}
+                )}
 
-                {/* Files Second (sorted in natural order) */}
-                {currentFiles.map((item) => (
-                  <MediaCard
-                    key={item.id}
-                    item={item}
-                    watchedPercent={watchProgress[item.id]?.percent ?? 0}
-                    onSelect={onSelectItem}
-                  />
-                ))}
-              </div>
+                {/* Video Poster Grid */}
+                {currentFiles.length > 0 && (
+                  <div className="media-grid">
+                    {currentFiles.map((item) => (
+                      <MediaCard
+                        key={item.id}
+                        item={item}
+                        watchedPercent={watchProgress[item.id]?.percent ?? 0}
+                        onSelect={onSelectItem}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
               /* Compact List View */
               <div className="media-list">
@@ -561,9 +534,11 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                       <div className="media-list-sub">PATH: /{folder.fullRelPath}</div>
                     </div>
                     <div className="media-list-meta">
-                      <span className="badge badge-inverted">
-                        [{folder.watchedPercent}% WATCHED]
-                      </span>
+                      {folder.watchedPercent > 0 && (
+                        <span className="badge badge-inverted">
+                          [{folder.watchedPercent}% WATCHED]
+                        </span>
+                      )}
                       <span className="badge">{folder.count} ITEMS</span>
                     </div>
                   </div>
@@ -606,9 +581,11 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
                         <div className="media-list-sub">{size}</div>
                       </div>
                       <div className="media-list-meta">
-                        <span className={`badge ${pct > 0 ? 'badge-inverted' : ''}`}>
-                          [{pct}% WATCHED]
-                        </span>
+                        {pct > 0 && (
+                          <span className="badge badge-inverted">
+                            [{pct}% WATCHED]
+                          </span>
+                        )}
                         <span className="badge">[{res}]</span>
                         <span className="badge">[{dur}]</span>
                         <span className="badge">[{codec}]</span>
@@ -627,7 +604,7 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
               </h2>
               <p style={{ fontSize: '0.9375rem', opacity: 0.85 }}>
                 {items.length === 0
-                  ? 'Click [SELECT ROOT DIRECTORY] in the header to point Monolith to your local media folder (.mkv, .mp4, .webm, .avi).'
+                  ? 'Click [◈ SCAN DIR] in the header to point Monolith to your local media folder (.mkv, .mp4, .webm, .avi).'
                   : 'Clear or adjust your search filter query above to display indexed media items.'}
               </p>
               {items.length === 0 && (

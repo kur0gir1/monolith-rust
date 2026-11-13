@@ -59,7 +59,7 @@ impl PartyManager {
         Self {
             inner: Arc::new(RwLock::new(PartyInner {
                 state: PartyState {
-                    enabled: true,
+                    enabled: false,
                     media_id: None,
                     media_title: None,
                     is_playing: false,
@@ -74,6 +74,19 @@ impl PartyManager {
                 peers: HashMap::new(),
             })),
         }
+    }
+
+    pub async fn set_enabled(&self, enabled: bool) -> PartyState {
+        if !enabled {
+            return self.reset().await;
+        }
+        let mut guard = self.inner.write().await;
+        guard.state.enabled = true;
+        guard.state.updated_at_ms = now_ms();
+        guard.state.event_seq += 1;
+        guard.state.updated_by = "host_toggle".to_string();
+        guard.state.active_peers = guard.peers.len().max(1);
+        guard.state.clone()
     }
 
     pub async fn get_state(&self, peer_id: Option<&str>) -> PartyState {
@@ -109,6 +122,18 @@ impl PartyManager {
 
         if let Some(en) = req.enabled {
             guard.state.enabled = en;
+            if !en {
+                guard.peers.clear();
+                guard.state.media_id = None;
+                guard.state.media_title = None;
+                guard.state.is_playing = false;
+                guard.state.current_time = 0.0;
+                guard.state.active_peers = 0;
+                guard.state.updated_at_ms = now;
+                guard.state.event_seq += 1;
+                guard.state.updated_by = req.peer_id;
+                return guard.state.clone();
+            }
         }
         if let Some(mid) = req.media_id {
             if mid.is_empty() {
@@ -156,6 +181,7 @@ impl PartyManager {
     pub async fn reset(&self) -> PartyState {
         let mut guard = self.inner.write().await;
         guard.peers.clear();
+        guard.state.enabled = false;
         guard.state.media_id = None;
         guard.state.media_title = None;
         guard.state.is_playing = false;
@@ -207,11 +233,18 @@ mod tests {
         assert!(before.active_peers >= 1);
 
         let reset_state = mgr.reset().await;
+        assert!(!reset_state.enabled);
         assert_eq!(reset_state.media_id, None);
         assert_eq!(reset_state.media_title, None);
         assert!(!reset_state.is_playing);
         assert_eq!(reset_state.current_time, 0.0);
         assert_eq!(reset_state.active_peers, 0);
         assert_eq!(reset_state.updated_by, "system_reset");
+
+        let enabled_state = mgr.set_enabled(true).await;
+        assert!(enabled_state.enabled);
+
+        let disabled_state = mgr.set_enabled(false).await;
+        assert!(!disabled_state.enabled);
     }
 }

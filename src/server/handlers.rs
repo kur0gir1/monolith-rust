@@ -206,11 +206,36 @@ pub async fn start_tunnel(
 ) -> Json<TunnelStatus> {
     let provider = TunnelProvider::from_str_opt(payload.provider.as_deref());
     let status = state.tunnel.start(provider, 9000).await;
+    if !status.active || status.status == "ERROR" {
+        state.party.reset().await;
+    } else {
+        state.party.set_enabled(true).await;
+        let attempt = state.tunnel.attempt_id().await;
+        let mut rx = state.tunnel.subscribe();
+        let tunnel = state.tunnel.clone();
+        let party = state.party.clone();
+        tokio::spawn(async move {
+            loop {
+                if tunnel.attempt_id().await != attempt {
+                    break;
+                }
+                let st = tunnel.get_status().await;
+                if !st.active || st.status == "ERROR" {
+                    party.reset().await;
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
     Json(status)
 }
 
 /// POST /api/tunnel/stop
 pub async fn stop_tunnel(State(state): State<AppState>) -> Json<TunnelStatus> {
+    state.party.reset().await;
     Json(state.tunnel.stop().await)
 }
 
