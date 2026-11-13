@@ -109,6 +109,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const lastSeekRestartAtRef = useRef<number>(0);
   const lastRemoteApplyAtRef = useRef<number>(0);
   const desirePlayingRef = useRef<boolean | null>(null);
+  const autoplayMutedRef = useRef<boolean>(false);
+  const nativeCleanupRef = useRef<(() => void) | null>(null);
   const isHost = isHostClient();
   const latestPartyStateRef = useRef(partyState);
   latestPartyStateRef.current = partyState;
@@ -151,10 +153,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const playbackRateRef = useRef<number>(playbackRate);
   playbackRateRef.current = playbackRate;
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [autoplayMutedNotice, setAutoplayMutedNotice] = useState<boolean>(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
 
   const safePlay = useCallback((video: HTMLVideoElement, fromUserAction: boolean = false) => {
     if (fromUserAction) {
       autoplayBlockedRef.current = false;
+      setAutoplayBlocked(false);
     } else if (autoplayBlockedRef.current) {
       return;
     }
@@ -164,7 +169,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const errName = (err as { name?: string })?.name;
       if (errName === 'AbortError') return;
       if (errName === 'NotAllowedError') {
+        if (!fromUserAction && !video.muted) {
+          // Mobile browsers block unmuted autoplay after async HLS load; start muted so video renders live
+          video.muted = true;
+          autoplayMutedRef.current = true;
+          setIsMuted(true);
+          setAutoplayMutedNotice(true);
+          video.play().catch((mutedErr) => {
+            if (streamGenRef.current !== gen) return;
+            const mutedErrName = (mutedErr as { name?: string })?.name;
+            if (mutedErrName === 'AbortError') return;
+            video.muted = false;
+            autoplayMutedRef.current = false;
+            setIsMuted(false);
+            setAutoplayMutedNotice(false);
+            autoplayBlockedRef.current = true;
+            setAutoplayBlocked(true);
+            setStreamStatus('TAP PLAY ▶');
+            setControlsVisible(true);
+          });
+          return;
+        }
         autoplayBlockedRef.current = true;
+        setAutoplayBlocked(true);
         setStreamStatus('TAP PLAY ▶');
         setControlsVisible(true);
         return;
@@ -227,19 +254,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         pendingSeekTimerRef.current = null;
       }
 
+      if (nativeCleanupRef.current) {
+        nativeCleanupRef.current();
+        nativeCleanupRef.current = null;
+      }
+
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
 
-      const startOffset = resumeTime >= 3 ? Math.floor(resumeTime) : 0;
+      // Quantize FFmpeg start offsets to 4s buckets so desktop host & mobile peers share one transcoder
+      const startOffset = resumeTime >= 4 ? Math.floor(resumeTime / 4) * 4 : 0;
+      const localResume = Math.max(0, resumeTime - startOffset);
       const gen = ++streamGenRef.current;
       streamOffsetRef.current = startOffset;
       isStreamReadyRef.current = false;
       streamReadyAtRef.current = 0;
       lastSeekRestartAtRef.current = Date.now();
       video.playbackRate = playbackRateRef.current;
-      setCurrentTime(startOffset > 0 ? startOffset : resumeTime);
+      setCurrentTime(resumeTime > 0 ? resumeTime : startOffset);
       setBufferedEnd(0);
       setStreamStatus('CONNECTING');
       setPlayerError(null);
@@ -254,6 +288,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           enableWorker: false,
           lowLatencyMode: false,
           startFragPrefetch: true,
+          startPosition: localResume >= 0.5 ? localResume : -1,
           maxBufferLength: 30,
           backBufferLength: 30,
           manifestLoadingTimeOut: 30000,
@@ -280,9 +315,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (streamGenRef.current !== gen) return;
           setStreamStatus('BUFFERING...');
-          if (startOffset === 0 && resumeTime > 0 && resumeTime < 3) {
-            video.currentTime = resumeTime;
-          }
           const shouldPlay = desirePlayingRef.current !== false;
           desirePlayingRef.current = null;
           if (shouldPlay) {
@@ -298,7 +330,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             isStreamReadyRef.current = true;
             streamReadyAtRef.current = Date.now();
           }
-          setStreamStatus((prev) => (prev === 'TAP PLAY ▶' ? prev : 'STREAMING'));
+          setStreamStatus((prev) =>
+            prev === 'TAP PLAY ▶' ? prev : autoplayMutedRef.current ? 'MUTED (TAP SOUND)' : 'STREAMING'
+          );
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -343,26 +377,70 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        const ac = new AbortController();
+        nativeCleanupRef.current = () => ac.abort();
+        let appliedLocalResume = localResume < 0.5;
+
+        const tryNativeResumeSeek = () => {
+          if (!appliedLocalResume && isLocalTimeSeekable(video, localResume)) {
+            video.currentTime = localResume;
+            appliedLocalResume = true;
+          }
+        };
+
+        const startOrPauseNative = () => {
+          const shouldPlay = desirePlayingRef.current !== false;
+          desirePlayingRef.current = null;
+          if (shouldPlay) {
+            safePlay(video);
+          } else {
+            video.pause();
+          }
+        };
+
+        video.pause();
         video.src = streamUrl;
+        video.load();
+
         video.addEventListener(
           'loadedmetadata',
           () => {
             if (streamGenRef.current !== gen) return;
+            setStreamStatus('BUFFERING...');
+            tryNativeResumeSeek();
+            startOrPauseNative();
+          },
+          { signal: ac.signal }
+        );
+
+        const markNativeReady = () => {
+          if (streamGenRef.current !== gen) return;
+          tryNativeResumeSeek();
+          if (!isStreamReadyRef.current) {
             isStreamReadyRef.current = true;
             streamReadyAtRef.current = Date.now();
-            setStreamStatus('STREAMING');
-            if (startOffset === 0 && resumeTime > 0 && resumeTime < 3) {
-              video.currentTime = resumeTime;
-            }
-            const shouldPlay = desirePlayingRef.current !== false;
-            desirePlayingRef.current = null;
-            if (shouldPlay) {
-              safePlay(video);
-            } else {
-              video.pause();
+          }
+          setStreamStatus((prev) =>
+            prev === 'TAP PLAY ▶' ? prev : autoplayMutedRef.current ? 'MUTED (TAP SOUND)' : 'STREAMING'
+          );
+          if (desirePlayingRef.current !== null) {
+            startOrPauseNative();
+          }
+        };
+
+        video.addEventListener('loadeddata', markNativeReady, { signal: ac.signal });
+        video.addEventListener('canplay', markNativeReady, { signal: ac.signal });
+        video.addEventListener(
+          'error',
+          () => {
+            if (streamGenRef.current !== gen) return;
+            const mediaErr = video.error;
+            if (mediaErr) {
+              setStreamStatus('ERROR');
+              setPlayerError(`SAFARI HLS ERROR (CODE ${mediaErr.code}): ${mediaErr.message || 'STREAM UNAVAILABLE'}`);
             }
           },
-          { once: true }
+          { signal: ac.signal }
         );
       } else {
         setPlayerError('FATAL: BROWSER ENVIRONMENT DOES NOT SUPPORT HLS PLAYBACK');
@@ -393,6 +471,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       desirePlayingRef.current = null;
     }
     autoplayBlockedRef.current = false;
+    autoplayMutedRef.current = false;
+    setAutoplayBlocked(false);
+    setAutoplayMutedNotice(false);
     setCurrentTime(startAt);
     initStream(initialAudio, startAt);
 
@@ -401,6 +482,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       if (pendingSeekTimerRef.current !== null) {
         window.clearTimeout(pendingSeekTimerRef.current);
         pendingSeekTimerRef.current = null;
+      }
+      if (nativeCleanupRef.current) {
+        nativeCleanupRef.current();
+        nativeCleanupRef.current = null;
       }
       if (hlsRef.current) {
         hlsRef.current.destroy();
@@ -433,8 +518,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const onPlay = () => {
       autoNextTriggeredRef.current = false;
       autoplayBlockedRef.current = false;
+      setAutoplayBlocked(false);
       setIsPlaying(true);
-      setStreamStatus('STREAMING');
+      setStreamStatus(autoplayMutedRef.current ? 'MUTED (TAP SOUND)' : 'STREAMING');
     };
     const onCanPlay = () => {
       if (!isStreamReadyRef.current) {
@@ -494,6 +580,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const onVolumeChange = () => {
       setVolume(video.volume);
       setIsMuted(video.muted);
+      if (!video.muted && autoplayMutedRef.current) {
+        autoplayMutedRef.current = false;
+        setAutoplayMutedNotice(false);
+        if (!video.paused) {
+          setStreamStatus('STREAMING');
+        }
+      }
     };
 
     video.addEventListener('play', onPlay);
@@ -632,6 +725,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           lastRemoteApplyAtRef.current = Date.now();
           desirePlayingRef.current = party.is_playing;
 
+          if (autoplayBlockedRef.current && video.paused) {
+            setCurrentTime(party.current_time);
+            return;
+          }
+
           const localTarget = party.current_time - streamOffsetRef.current;
           const canSeekLocally = isLocalTimeSeekable(video, localTarget);
           const signedDrift = party.current_time - moviePos;
@@ -664,6 +762,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             broadcastPartyUpdate(!video.paused, moviePos, true);
           }
           return;
+        }
+
+        if (autoplayBlockedRef.current) {
+          if (!video.paused) {
+            autoplayBlockedRef.current = false;
+            setAutoplayBlocked(false);
+          } else {
+            // Do not destroy and re-init the stream every 12s while waiting for user tap on mobile
+            setCurrentTime(party.current_time);
+            return;
+          }
         }
 
         // Wait until first segment is buffered and settled before evaluating guest drift
@@ -755,21 +864,54 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [item.id, applyMovieSeek, safePlay]);
 
+  const handleUnmuteAutoplay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = false;
+    if (video.volume === 0) video.volume = 1;
+    autoplayMutedRef.current = false;
+    setIsMuted(false);
+    setAutoplayMutedNotice(false);
+    if (video.paused && desirePlayingRef.current !== false) {
+      safePlay(video, true);
+    } else if (!video.paused) {
+      setStreamStatus('STREAMING');
+    }
+  }, [safePlay]);
+
   // Transport actions
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    const wasBlocked = autoplayBlockedRef.current;
     const moviePos = streamOffsetRef.current + video.currentTime;
     if (video.paused) {
+      if (autoplayMutedRef.current) {
+        video.muted = false;
+        autoplayMutedRef.current = false;
+        setIsMuted(false);
+        setAutoplayMutedNotice(false);
+      }
       desirePlayingRef.current = true;
+      const p = latestPartyStateRef.current;
+      if (wasBlocked && !isHost && partySyncEnabled && p?.enabled && p.media_id === item.id) {
+        if (Math.abs(p.current_time - moviePos) > 6.0) {
+          autoplayBlockedRef.current = false;
+          setAutoplayBlocked(false);
+          applyMovieSeek(p.current_time, true, false, true);
+          return;
+        }
+      }
       safePlay(video, true);
-      broadcastPartyUpdate(true, moviePos, false);
+      if (!wasBlocked) {
+        broadcastPartyUpdate(true, moviePos, false);
+      }
     } else {
       desirePlayingRef.current = false;
       video.pause();
       broadcastPartyUpdate(false, moviePos, false);
     }
-  }, [broadcastPartyUpdate, safePlay]);
+  }, [broadcastPartyUpdate, safePlay, isHost, partySyncEnabled, item.id, applyMovieSeek]);
 
   const seekBy = useCallback(
     (deltaSeconds: number) => {
@@ -862,6 +1004,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!video) return;
     video.muted = !video.muted;
     setIsMuted(video.muted);
+    if (!video.muted && autoplayMutedRef.current) {
+      autoplayMutedRef.current = false;
+      setAutoplayMutedNotice(false);
+      if (!video.paused) setStreamStatus('STREAMING');
+    }
   }, []);
 
   const handleVolumeChange = useCallback((newVol: number) => {
@@ -1104,7 +1251,48 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               ref={videoRef}
               className="player-video-element"
               playsInline
+              preload="auto"
             />
+
+            {autoplayMutedNotice && (
+              <button
+                type="button"
+                className="brutalist-btn sm active"
+                style={{
+                  position: 'absolute',
+                  top: '56px',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  zIndex: 25,
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleUnmuteAutoplay();
+                }}
+              >
+                [🔇 SOUND MUTED — TAP TO UNMUTE]
+              </button>
+            )}
+
+            {autoplayBlocked && !isPlaying && (
+              <button
+                type="button"
+                className="on-video-action-btn primary"
+                style={{
+                  position: 'absolute',
+                  top: '56px',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  zIndex: 25,
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  togglePlay();
+                }}
+              >
+                ▶ TAP PLAY TO JOIN STREAM
+              </button>
+            )}
 
             {/* Netflix-style Skip Intro / Skip Credits / Next Episode floating button */}
             {activeSkip && (

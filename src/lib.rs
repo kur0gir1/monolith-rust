@@ -23,8 +23,9 @@ pub fn run() {
     tracing::info!("Initializing Monolith Desktop Host...");
 
     let app_state = AppState::new_with_persistence();
+    let exit_state = app_state.clone();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             pick_directory,
@@ -108,6 +109,16 @@ pub fn run() {
             tracing::info!("Monolith Tauri v2 host setup complete");
             Ok(())
         })
-        .run(tauri::generate_context!("src-tauri/tauri.conf.json"))
-        .expect("error while running Monolith desktop host");
+        .build(tauri::generate_context!("src-tauri/tauri.conf.json"))
+        .expect("error while building Monolith desktop host");
+
+    app.run(move |_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            let state = exit_state.clone();
+            tauri::async_runtime::block_on(async move {
+                state.transcode_sessions.shutdown_all().await;
+                let _ = state.tunnel.stop().await;
+            });
+        }
+    });
 }

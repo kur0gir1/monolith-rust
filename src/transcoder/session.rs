@@ -12,6 +12,95 @@ use crate::models::{HlsStreamInfo, TranscodeMode};
 use crate::transcoder::nvenc::probe_nvenc_available;
 use crate::transcoder::pipeline::build_ffmpeg_transcode_args_from;
 
+const MAX_CONCURRENT_SESSIONS: usize = 2;
+
+#[cfg(windows)]
+mod win_job {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimitInfo {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimitInfo {
+        basic: BasicLimitInfo,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    extern "system" {
+        fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> *mut c_void;
+        fn SetInformationJobObject(job: *mut c_void, info_class: i32, info: *const c_void, len: u32) -> i32;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+    }
+
+    struct JobHandle(*mut c_void);
+    unsafe impl Send for JobHandle {}
+    unsafe impl Sync for JobHandle {}
+
+    static JOB: OnceLock<Option<JobHandle>> = OnceLock::new();
+
+    /// Attaches child processes to a Job Object so the OS kills all ffmpeg processes on app exit/crash.
+    pub fn assign_child(child: &tokio::process::Child) {
+        let Some(job) = JOB.get_or_init(|| unsafe {
+            let h = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+            if h.is_null() {
+                return None;
+            }
+            let mut info = ExtendedLimitInfo::default();
+            info.basic.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                h,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                (&info as *const ExtendedLimitInfo).cast(),
+                std::mem::size_of::<ExtendedLimitInfo>() as u32,
+            );
+            if ok == 0 {
+                return None;
+            }
+            Some(JobHandle(h))
+        }) else {
+            return;
+        };
+
+        if let Some(raw_proc) = child.raw_handle() {
+            unsafe {
+                let _ = AssignProcessToJobObject(job.0, raw_proc.cast());
+            }
+        }
+    }
+}
+
 pub struct ActiveSession {
     pub session_id: String,
     pub media_id: String,
@@ -110,7 +199,15 @@ impl SessionManager {
         if let Some(session) = map.get_mut(&key) {
             session.last_accessed = Instant::now();
             let playlist_check = session.temp_dir.join("index.m3u8");
-            if playlist_check.exists() {
+            let child_alive = match session.child.as_mut() {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => false,
+            };
+            let is_complete = playlist_check.exists()
+                && fs::read_to_string(&playlist_check)
+                    .map(|c| c.contains("#EXT-X-ENDLIST"))
+                    .unwrap_or(false);
+            if playlist_check.exists() && (child_alive || is_complete) {
                 return Ok(HlsStreamInfo {
                     session_id: session.session_id.clone(),
                     master_playlist_url: format!("/api/stream/{}/master.m3u8", media_id),
@@ -127,11 +224,11 @@ impl SessionManager {
             }
         }
 
-        // Keep at most 3 concurrent offset sessions per media_id so old seek positions get reaped promptly
-        while map.values().filter(|s| s.media_id == media_id).count() >= 3 {
+        // Globally cap concurrent active FFmpeg sessions so GPU VRAM and decoders are never starved
+        while map.len() >= MAX_CONCURRENT_SESSIONS {
             if let Some(oldest_key) = map
                 .iter()
-                .filter(|(k, s)| s.media_id == media_id && *k != &key)
+                .filter(|(k, _)| *k != &key)
                 .min_by_key(|(_, s)| s.last_accessed)
                 .map(|(k, _)| k.clone())
             {
@@ -200,6 +297,8 @@ impl SessionManager {
                 Ok(c) => c,
                 Err(_) => continue,
             };
+            #[cfg(windows)]
+            win_job::assign_child(&child);
 
             // Poll until playlist has at least one .ts segment OR child exits early with error
             let start = Instant::now();
@@ -303,6 +402,17 @@ impl SessionManager {
                 }
                 let _ = fs::remove_dir_all(&session.temp_dir);
             }
+        }
+    }
+
+    /// Terminates every active transcoding session immediately (e.g. during application exit).
+    pub async fn shutdown_all(&self) {
+        let mut map = self.sessions.write().await;
+        for (_, mut session) in map.drain() {
+            if let Some(mut child) = session.child.take() {
+                let _ = child.start_kill();
+            }
+            let _ = fs::remove_dir_all(&session.temp_dir);
         }
     }
 }

@@ -21,6 +21,40 @@ pub struct SwitchAudioRequest {
     pub audio_index: u32,
 }
 
+fn extract_invite(req_headers: &HeaderMap, query: &AudioQuery) -> Option<String> {
+    query
+        .invite
+        .clone()
+        .or_else(|| {
+            req_headers
+                .get("x-monolith-invite")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn append_invite_to_segments(playlist: &str, invite_token: Option<&str>) -> String {
+    let Some(tok) = invite_token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return playlist.to_string();
+    };
+    playlist
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.contains("invite=") {
+                let sep = if trimmed.contains('?') { '&' } else { '?' };
+                format!("{}{}invite={}", trimmed, sep, tok)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if playlist.ends_with('\n') { "\n" } else { "" }
+}
+
 /// GET /api/stream/:id/master.m3u8
 pub async fn get_master_playlist(
     State(state): State<AppState>,
@@ -39,13 +73,7 @@ pub async fn get_master_playlist(
         (1920, 1080)
     };
 
-    let invite = query.invite.clone().or_else(|| {
-        req_headers
-            .get("x-monolith-invite")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    });
+    let invite = extract_invite(&req_headers, &query);
 
     let playlist_content = generate_master_playlist_with_params(
         &id,
@@ -74,6 +102,7 @@ async fn serve_variant_playlist(
     id: &str,
     audio_index: u32,
     start_seconds: u64,
+    invite_token: Option<&str>,
 ) -> Result<Response, AppError> {
     let item = state
         .get_item(id)
@@ -99,7 +128,8 @@ async fn serve_variant_playlist(
         return Err(AppError::TranscodeError("HLS playlist not ready yet".to_string()));
     }
 
-    let content = tokio::fs::read_to_string(&playlist_file).await?;
+    let raw_content = tokio::fs::read_to_string(&playlist_file).await?;
+    let content = append_invite_to_segments(&raw_content, invite_token);
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -137,17 +167,29 @@ async fn serve_segment_from_dir(temp_dir: PathBuf, segment: &str) -> Result<Resp
 pub async fn get_variant_playlist(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    req_headers: HeaderMap,
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
-    serve_variant_playlist(&state, &id, query.audio.unwrap_or(0), query.start.unwrap_or(0)).await
+    let invite = extract_invite(&req_headers, &query);
+    serve_variant_playlist(
+        &state,
+        &id,
+        query.audio.unwrap_or(0),
+        query.start.unwrap_or(0),
+        invite.as_deref(),
+    )
+    .await
 }
 
 /// GET /api/stream/:id/s/:audio/:start/index.m3u8
 pub async fn get_scoped_variant_playlist(
     State(state): State<AppState>,
     AxumPath((id, audio, start)): AxumPath<(String, u32, u64)>,
+    req_headers: HeaderMap,
+    Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
-    serve_variant_playlist(&state, &id, audio, start).await
+    let invite = extract_invite(&req_headers, &query);
+    serve_variant_playlist(&state, &id, audio, start, invite.as_deref()).await
 }
 
 /// GET /api/stream/:id/s/:audio/:start/:segment
@@ -247,4 +289,19 @@ pub async fn switch_audio(
         "status": "switched",
         "audio_index": payload.audio_index
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_invite_to_segments;
+
+    #[test]
+    fn test_append_invite_to_segments() {
+        let raw = "#EXTM3U\n#EXT-X-VERSION:6\n#EXTINF:2.002,\nindex0.ts\n#EXTINF:2.002,\nindex1.ts\n";
+        let rewritten = append_invite_to_segments(raw, Some("tok123"));
+        assert!(rewritten.contains("index0.ts?invite=tok123"));
+        assert!(rewritten.contains("index1.ts?invite=tok123"));
+        assert!(rewritten.contains("#EXTM3U\n#EXT-X-VERSION:6"));
+        assert_eq!(append_invite_to_segments(raw, None), raw);
+    }
 }
