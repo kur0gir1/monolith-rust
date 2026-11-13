@@ -111,6 +111,10 @@ strong {
   mix-blend-mode: screen;
 }
 
+.app-container.player-mode .noise-overlay {
+  display: none;
+}
+
 .noise-overlay svg {
   width: 100%;
   height: 100%;

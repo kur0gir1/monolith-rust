@@ -10,7 +10,6 @@ use crate::error::AppError;
 use crate::metadata::find_ffmpeg;
 use crate::models::{HlsStreamInfo, TranscodeMode};
 use crate::transcoder::nvenc::probe_nvenc_available;
-use crate::transcoder::pipeline::build_ffmpeg_transcode_args_from;
 
 const MAX_CONCURRENT_SESSIONS: usize = 2;
 
@@ -135,8 +134,13 @@ impl SessionManager {
         }
     }
 
-    fn session_key(media_id: &str, audio_index: u32, start_seconds: u64) -> String {
-        format!("{}_{}_{}", media_id, audio_index, start_seconds)
+    fn session_key(media_id: &str, audio_index: u32, start_seconds: u64, max_width: u32) -> String {
+        let cap_w = crate::transcoder::normalize_max_width(Some(max_width));
+        if cap_w <= 1280 {
+            format!("{}_{}_{}_720", media_id, audio_index, start_seconds)
+        } else {
+            format!("{}_{}_{}", media_id, audio_index, start_seconds)
+        }
     }
 
     /// Retrieves the most recently accessed active session's temp directory for `media_id`.
@@ -162,7 +166,19 @@ impl SessionManager {
         audio_index: u32,
         start_seconds: u64,
     ) -> Option<PathBuf> {
-        let key = Self::session_key(media_id, audio_index, start_seconds);
+        self.get_session_temp_dir_with_width(media_id, audio_index, start_seconds, 1920)
+            .await
+    }
+
+    /// Retrieves an exact session's temp directory for `(media_id, audio_index, start_seconds, max_width)`.
+    pub async fn get_session_temp_dir_with_width(
+        &self,
+        media_id: &str,
+        audio_index: u32,
+        start_seconds: u64,
+        max_width: u32,
+    ) -> Option<PathBuf> {
+        let key = Self::session_key(media_id, audio_index, start_seconds, max_width);
         let mut map = self.sessions.write().await;
         if let Some(session) = map.get_mut(&key) {
             session.last_accessed = Instant::now();
@@ -193,7 +209,29 @@ impl SessionManager {
         video_codec: Option<&str>,
         start_seconds: u64,
     ) -> Result<HlsStreamInfo, AppError> {
-        let key = Self::session_key(media_id, audio_index, start_seconds);
+        self.start_or_get_session_with_width(
+            media_id,
+            media_path,
+            audio_index,
+            video_codec,
+            start_seconds,
+            1920,
+        )
+        .await
+    }
+
+    /// Starts or resumes an HLS transcoding session with an explicit resolution width cap.
+    pub async fn start_or_get_session_with_width(
+        &self,
+        media_id: &str,
+        media_path: &Path,
+        audio_index: u32,
+        video_codec: Option<&str>,
+        start_seconds: u64,
+        max_width: u32,
+    ) -> Result<HlsStreamInfo, AppError> {
+        let capped_w = crate::transcoder::normalize_max_width(Some(max_width));
+        let key = Self::session_key(media_id, audio_index, start_seconds, capped_w);
         let mut map = self.sessions.write().await;
 
         if let Some(session) = map.get_mut(&key) {
@@ -273,21 +311,22 @@ impl SessionManager {
         for mode in candidate_modes {
             let _ = fs::remove_file(&playlist_path);
             let mut args = vec!["-y".to_string(), "-v".to_string(), "error".to_string()];
-            args.extend(build_ffmpeg_transcode_args_from(
+            args.extend(crate::transcoder::build_ffmpeg_transcode_args_with_options(
                 &mode,
                 media_path,
                 &playlist_path,
                 audio_index,
                 start_seconds,
+                capped_w,
             ));
 
             info!(
-                "Spawning FFmpeg transcoding session {} (mode: {:?}, audio: {}, start: {}s)",
-                session_id, mode, audio_index, start_seconds
+                "Spawning FFmpeg transcoding session {} (mode: {:?}, audio: {}, start: {}s, max_w: {})",
+                session_id, mode, audio_index, start_seconds, capped_w
             );
 
             let mut cmd = tokio::process::Command::new(&ffmpeg);
-            cmd.args(&args).kill_on_drop(true);
+            cmd.current_dir(&temp_dir).args(&args).kill_on_drop(true);
             #[cfg(windows)]
             {
                 cmd.creation_flags(crate::metadata::CREATE_NO_WINDOW);
@@ -300,14 +339,17 @@ impl SessionManager {
             #[cfg(windows)]
             win_job::assign_child(&child);
 
-            // Poll until playlist has at least one .ts segment OR child exits early with error
+            // Poll until playlist has at least one media segment (and init.mp4 for fMP4) OR child exits early
             let start = Instant::now();
             let mut ready = false;
             let mut exited_early = false;
             while start.elapsed() < Duration::from_secs(25) {
                 if playlist_path.exists() {
                     if let Ok(content) = fs::read_to_string(&playlist_path) {
-                        if content.contains(".ts") {
+                        let has_segment = content.contains(".m4s") || content.contains(".ts");
+                        let has_init =
+                            !content.contains("init.mp4") || temp_dir.join("init.mp4").exists();
+                        if has_segment && has_init {
                             ready = true;
                             break;
                         }
@@ -414,5 +456,35 @@ impl SessionManager {
             }
             let _ = fs::remove_dir_all(&session.temp_dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionManager;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn test_session_manager_fmp4_outputs_init_in_temp_dir() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/media/test_multistream.mkv");
+        if !fixture.exists() {
+            return;
+        }
+        let mgr = SessionManager::new();
+        let info = mgr
+            .start_or_get_session_with_width("fmp4_test", &fixture, 0, Some("h264"), 0, 1280)
+            .await
+            .expect("session should start");
+        assert!(info.session_id.ends_with("_720"));
+        let dir = mgr
+            .get_session_temp_dir_with_width("fmp4_test", 0, 0, 1280)
+            .await
+            .expect("temp dir should exist");
+        let playlist = std::fs::read_to_string(dir.join("index.m3u8")).unwrap();
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+        assert!(playlist.contains(".m4s"));
+        assert!(dir.join("init.mp4").exists());
+        mgr.shutdown_all().await;
     }
 }

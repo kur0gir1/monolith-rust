@@ -108,6 +108,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const autoplayBlockedRef = useRef<boolean>(false);
   const lastSeekRestartAtRef = useRef<number>(0);
   const lastRemoteApplyAtRef = useRef<number>(0);
+  const lastHudUpdateAtRef = useRef<number>(0);
+  const lastProgressSaveAtRef = useRef<number>(0);
   const desirePlayingRef = useRef<boolean | null>(null);
   const autoplayMutedRef = useRef<boolean>(false);
   const nativeCleanupRef = useRef<(() => void) | null>(null);
@@ -135,6 +137,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isSyncingParty, setIsSyncingParty] = useState<boolean>(false);
   const lastAppliedSeqRef = useRef<number>(partyState?.event_seq ?? 0);
   const isWatchPartyActive = Boolean(serverStatus?.tunnel?.active || partyState?.enabled);
+  const lowBandwidthStreamRef = useRef<boolean>(isWatchPartyActive || !isHost);
+  lowBandwidthStreamRef.current = isWatchPartyActive || !isHost;
   const displayPeers = Math.max(activePeers, partyState?.active_peers ?? 1);
   const serverPartyEnabledRef = useRef<boolean>(isWatchPartyActive);
 
@@ -271,13 +275,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       isStreamReadyRef.current = false;
       streamReadyAtRef.current = 0;
       lastSeekRestartAtRef.current = Date.now();
+      lastHudUpdateAtRef.current = 0;
+      lastProgressSaveAtRef.current = 0;
       video.playbackRate = playbackRateRef.current;
       setCurrentTime(resumeTime > 0 ? resumeTime : startOffset);
       setBufferedEnd(0);
       setStreamStatus('CONNECTING');
       setPlayerError(null);
 
-      const streamUrl = api.getMasterStreamUrl(item.id, audioIdx, startOffset);
+      const streamUrl = api.getMasterStreamUrl(
+        item.id,
+        audioIdx,
+        startOffset,
+        lowBandwidthStreamRef.current
+      );
 
       if (Hls.isSupported()) {
         let fatalNetworkRetries = 0;
@@ -288,8 +299,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           enableWorker: true,
           lowLatencyMode: false,
           startFragPrefetch: true,
-          maxBufferLength: 30,
-          backBufferLength: 30,
+          capLevelToPlayerSize: true,
+          maxBufferLength: 24,
+          maxMaxBufferLength: 48,
+          backBufferLength: 20,
           manifestLoadingTimeOut: 30000,
           manifestLoadingMaxRetry: 10,
           manifestLoadingRetryDelay: 1000,
@@ -510,7 +523,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const syncCustomSubtitles = useCallback((video: HTMLVideoElement, movieTime: number) => {
     const activeTrack = Array.from(video.textTracks).find((t) => t.mode === 'hidden');
     if (!activeTrack?.cues) {
-      setActiveCueText('');
+      setActiveCueText((prev) => (prev === '' ? prev : ''));
       return;
     }
     const lines: string[] = [];
@@ -520,7 +533,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         lines.push(cue.text.replace(/<[^>]+>/g, ''));
       }
     }
-    setActiveCueText(lines.join('\n'));
+    const nextText = lines.join('\n');
+    setActiveCueText((prev) => (prev === nextText ? prev : nextText));
   }, []);
 
   // Attach HTML5 video event listeners for custom HUD state
@@ -544,6 +558,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const onPause = () => {
       setIsPlaying(false);
       setControlsVisible(true);
+      if (isStreamReadyRef.current) {
+        setCurrentTime(streamOffsetRef.current + video.currentTime);
+      }
     };
     const onEnded = () => {
       if (autoNext && nextItem && onSelectItem && !autoNextTriggeredRef.current) {
@@ -553,13 +570,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
     const onTimeUpdate = () => {
       if (!isStreamReadyRef.current) return;
+      const now = Date.now();
       const cur = streamOffsetRef.current + video.currentTime;
-      setCurrentTime(cur);
       if (streamOffsetRef.current > 0) {
         syncCustomSubtitles(video, cur);
       }
-      if (video.buffered.length > 0) {
-        setBufferedEnd(streamOffsetRef.current + video.buffered.end(video.buffered.length - 1));
+      if (now - lastHudUpdateAtRef.current >= 900 || video.paused) {
+        lastHudUpdateAtRef.current = now;
+        setCurrentTime(cur);
+        if (video.buffered.length > 0) {
+          setBufferedEnd(streamOffsetRef.current + video.buffered.end(video.buffered.length - 1));
+        }
       }
       const metaDur = item.metadata?.duration_seconds ?? 0;
       const vidDur =
@@ -567,7 +588,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           ? streamOffsetRef.current + video.duration
           : 0;
       const effDur = Math.max(metaDur, vidDur);
-      if (effDur > 0 && cur > 1) {
+      if (effDur > 0 && cur > 1 && now - lastProgressSaveAtRef.current >= 2000) {
+        lastProgressSaveAtRef.current = now;
         onProgressUpdate?.(item.id, cur, effDur);
       }
       if (
@@ -815,20 +837,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           return;
         }
 
-        if (absDrift <= 4.0) {
+        if (absDrift <= 1.2) {
           if (Math.abs(video.playbackRate - playbackRateRef.current) > 0.01) {
             video.playbackRate = playbackRateRef.current;
           }
           return;
         }
 
-        // Smooth catch-up in moderate drift band (4s..12s) without restarting FFmpeg
+        // Smooth rate nudging (0.95x-1.05x for small drift, 0.92x-1.08x up to 12s) avoids jarring seeks
         if (absDrift <= 12.0) {
           if (isLocalTimeSeekable(video, localTarget) && absDrift > 5.0) {
             video.currentTime = localTarget;
             video.playbackRate = playbackRateRef.current;
           } else {
-            const nudge = signedDrift > 0 ? 1.08 : 0.92;
+            const nudge =
+              absDrift <= 4.0
+                ? signedDrift > 0
+                  ? 1.05
+                  : 0.95
+                : signedDrift > 0
+                ? 1.08
+                : 0.92;
             const targetRate = Math.min(2.0, Math.max(0.5, playbackRateRef.current * nudge));
             if (Math.abs(video.playbackRate - targetRate) > 0.01) {
               video.playbackRate = targetRate;

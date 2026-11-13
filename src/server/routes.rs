@@ -19,8 +19,9 @@ use crate::server::handlers::{
     stop_tunnel, trigger_scan, update_party_state,
 };
 use crate::server::stream_handler::{
-    get_master_playlist, get_scoped_segment, get_scoped_variant_playlist, get_segment,
-    get_subtitles, get_variant_playlist, switch_audio,
+    get_master_playlist, get_quality_scoped_segment, get_quality_variant_playlist,
+    get_scoped_segment, get_scoped_variant_playlist, get_segment, get_subtitles,
+    get_variant_playlist, switch_audio,
 };
 
 const DEFAULT_INDEX_HTML: &str = r#"<!DOCTYPE html>
@@ -217,6 +218,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/media/:id/poster", get(get_poster))
         .route("/scan", post(trigger_scan))
         .route("/stream/:id/master.m3u8", get(get_master_playlist))
+        .route(
+            "/stream/:id/v/:max_w/:audio/:start/index.m3u8",
+            get(get_quality_variant_playlist),
+        )
+        .route(
+            "/stream/:id/v/:max_w/:audio/:start/:segment",
+            get(get_quality_scoped_segment),
+        )
         .route(
             "/stream/:id/s/:audio/:start/index.m3u8",
             get(get_scoped_variant_playlist),

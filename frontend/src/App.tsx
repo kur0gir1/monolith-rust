@@ -225,8 +225,8 @@ export const App: React.FC = () => {
 
   return (
     <div className={`app-container ${view === 'player' ? 'player-mode' : ''}`}>
-      {/* Global Grainy SVG Terminal Noise Overlay */}
-      <NoiseOverlay />
+      {/* Skip full-viewport SVG noise shader during playback so mobile hardware video planes compose smoothly */}
+      {view !== 'player' && <NoiseOverlay />}
 
       {/* Cyber-Sigil Brutalist Header */}
       <Header

@@ -255,10 +255,16 @@ export class ApiClient {
     return appendInviteParam(`${this.baseUrl}/api/media/${encodeURIComponent(id)}/poster`);
   }
 
-  getMasterStreamUrl(id: string, audioIndex?: number, startSeconds?: number): string {
+  getMasterStreamUrl(
+    id: string,
+    audioIndex?: number,
+    startSeconds?: number,
+    lowBandwidth?: boolean
+  ): string {
     const qs: string[] = [];
     if (audioIndex !== undefined) qs.push(`audio=${audioIndex}`);
     if (startSeconds !== undefined && startSeconds >= 3) qs.push(`start=${Math.floor(startSeconds)}`);
+    if (lowBandwidth) qs.push('q=720');
     const query = qs.length > 0 ? `?${qs.join('&')}` : '';
     return appendInviteParam(
       `${this.baseUrl}/api/stream/${encodeURIComponent(id)}/master.m3u8${query}`

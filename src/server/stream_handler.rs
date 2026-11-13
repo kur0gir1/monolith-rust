@@ -7,13 +7,16 @@ use std::path::PathBuf;
 
 use crate::app_state::AppState;
 use crate::error::AppError;
-use crate::transcoder::{extract_webvtt_subtitles, generate_master_playlist_with_params};
+use crate::transcoder::{
+    extract_webvtt_subtitles, generate_master_playlist_with_options, normalize_max_width,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct AudioQuery {
     pub audio: Option<u32>,
     pub start: Option<u64>,
     pub invite: Option<String>,
+    pub q: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +38,29 @@ fn extract_invite(req_headers: &HeaderMap, query: &AudioQuery) -> Option<String>
         .filter(|s| !s.is_empty())
 }
 
+fn rewrite_map_uri(line: &str, tok: &str) -> String {
+    let Some(start) = line.find("URI=\"") else {
+        return line.to_string();
+    };
+    let uri_start = start + 5;
+    let Some(rel_end) = line[uri_start..].find('"') else {
+        return line.to_string();
+    };
+    let uri = &line[uri_start..uri_start + rel_end];
+    if uri.contains("invite=") {
+        return line.to_string();
+    }
+    let sep = if uri.contains('?') { '&' } else { '?' };
+    format!(
+        "{}{}{}invite={}{}",
+        &line[..uri_start],
+        uri,
+        sep,
+        tok,
+        &line[uri_start + rel_end..]
+    )
+}
+
 fn append_invite_to_segments(playlist: &str, invite_token: Option<&str>) -> String {
     let Some(tok) = invite_token.map(str::trim).filter(|t| !t.is_empty()) else {
         return playlist.to_string();
@@ -43,7 +69,9 @@ fn append_invite_to_segments(playlist: &str, invite_token: Option<&str>) -> Stri
         .lines()
         .map(|line| {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.contains("invite=") {
+            if trimmed.starts_with("#EXT-X-MAP:") {
+                rewrite_map_uri(line, tok)
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.contains("invite=") {
                 let sep = if trimmed.contains('?') { '&' } else { '?' };
                 format!("{}{}invite={}", trimmed, sep, tok)
             } else {
@@ -74,14 +102,16 @@ pub async fn get_master_playlist(
     };
 
     let invite = extract_invite(&req_headers, &query);
+    let max_width = query.q.map(|q| normalize_max_width(Some(if q <= 720 { 1280 } else { q })));
 
-    let playlist_content = generate_master_playlist_with_params(
+    let playlist_content = generate_master_playlist_with_options(
         &id,
         width,
         height,
         query.audio,
         query.start,
         invite.as_deref(),
+        max_width,
     );
 
     let mut headers = HeaderMap::new();
@@ -102,6 +132,7 @@ async fn serve_variant_playlist(
     id: &str,
     audio_index: u32,
     start_seconds: u64,
+    max_width: u32,
     invite_token: Option<&str>,
 ) -> Result<Response, AppError> {
     let item = state
@@ -111,15 +142,16 @@ async fn serve_variant_playlist(
 
     let media_path = PathBuf::from(&item.file_path);
     let video_codec = item.metadata.as_ref().map(|m| m.video_codec.as_str());
+    let capped_w = normalize_max_width(Some(max_width));
 
     state
         .transcode_sessions
-        .start_or_get_session_at(id, &media_path, audio_index, video_codec, start_seconds)
+        .start_or_get_session_with_width(id, &media_path, audio_index, video_codec, start_seconds, capped_w)
         .await?;
 
     let temp_dir = state
         .transcode_sessions
-        .get_session_temp_dir_at(id, audio_index, start_seconds)
+        .get_session_temp_dir_with_width(id, audio_index, start_seconds, capped_w)
         .await
         .ok_or_else(|| AppError::TranscodeError("Failed to find session temp directory".to_string()))?;
 
@@ -150,10 +182,17 @@ async fn serve_segment_from_dir(temp_dir: PathBuf, segment: &str) -> Result<Resp
     }
 
     let bytes = tokio::fs::read(&segment_path).await?;
+    let content_type = if segment.ends_with(".m4s") || segment.ends_with(".mp4") {
+        "video/mp4"
+    } else if segment.ends_with(".ts") {
+        "video/mp2t"
+    } else {
+        "application/octet-stream"
+    };
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("video/mp2t"),
+        HeaderValue::from_static(content_type),
     );
     headers.insert(
         header::CACHE_CONTROL,
@@ -171,11 +210,13 @@ pub async fn get_variant_playlist(
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
     let invite = extract_invite(&req_headers, &query);
+    let max_width = normalize_max_width(query.q.map(|q| if q <= 720 { 1280 } else { q }));
     serve_variant_playlist(
         &state,
         &id,
         query.audio.unwrap_or(0),
         query.start.unwrap_or(0),
+        max_width,
         invite.as_deref(),
     )
     .await
@@ -189,7 +230,37 @@ pub async fn get_scoped_variant_playlist(
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
     let invite = extract_invite(&req_headers, &query);
-    serve_variant_playlist(&state, &id, audio, start, invite.as_deref()).await
+    serve_variant_playlist(&state, &id, audio, start, 1920, invite.as_deref()).await
+}
+
+/// GET /api/stream/:id/v/:max_w/:audio/:start/index.m3u8
+pub async fn get_quality_variant_playlist(
+    State(state): State<AppState>,
+    AxumPath((id, max_w, audio, start)): AxumPath<(String, u32, u32, u64)>,
+    req_headers: HeaderMap,
+    Query(query): Query<AudioQuery>,
+) -> Result<Response, AppError> {
+    let invite = extract_invite(&req_headers, &query);
+    serve_variant_playlist(&state, &id, audio, start, max_w, invite.as_deref()).await
+}
+
+/// GET /api/stream/:id/v/:max_w/:audio/:start/:segment
+pub async fn get_quality_scoped_segment(
+    State(state): State<AppState>,
+    AxumPath((id, max_w, audio, start, segment)): AxumPath<(String, u32, u32, u64, String)>,
+) -> Result<Response, AppError> {
+    if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
+        return Err(AppError::InvalidPath("Invalid segment filename".to_string()));
+    }
+
+    let capped_w = normalize_max_width(Some(max_w));
+    let temp_dir = state
+        .transcode_sessions
+        .get_session_temp_dir_with_width(&id, audio, start, capped_w)
+        .await
+        .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
+
+    serve_segment_from_dir(temp_dir, &segment).await
 }
 
 /// GET /api/stream/:id/s/:audio/:start/:segment
@@ -297,11 +368,12 @@ mod tests {
 
     #[test]
     fn test_append_invite_to_segments() {
-        let raw = "#EXTM3U\n#EXT-X-VERSION:6\n#EXTINF:2.002,\nindex0.ts\n#EXTINF:2.002,\nindex1.ts\n";
+        let raw = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.002,\nindex0.m4s\n#EXTINF:2.002,\nindex1.m4s\n";
         let rewritten = append_invite_to_segments(raw, Some("tok123"));
-        assert!(rewritten.contains("index0.ts?invite=tok123"));
-        assert!(rewritten.contains("index1.ts?invite=tok123"));
-        assert!(rewritten.contains("#EXTM3U\n#EXT-X-VERSION:6"));
+        assert!(rewritten.contains("#EXT-X-MAP:URI=\"init.mp4?invite=tok123\""));
+        assert!(rewritten.contains("index0.m4s?invite=tok123"));
+        assert!(rewritten.contains("index1.m4s?invite=tok123"));
+        assert!(rewritten.contains("#EXTM3U\n#EXT-X-VERSION:7"));
         assert_eq!(append_invite_to_segments(raw, None), raw);
     }
 }
