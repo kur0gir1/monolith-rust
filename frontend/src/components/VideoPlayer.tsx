@@ -103,21 +103,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const streamOffsetRef = useRef<number>(0);
   const pendingSeekTimerRef = useRef<number | null>(null);
   const isStreamReadyRef = useRef<boolean>(false);
+  const streamReadyAtRef = useRef<number>(0);
+  const streamGenRef = useRef<number>(0);
+  const autoplayBlockedRef = useRef<boolean>(false);
   const lastSeekRestartAtRef = useRef<number>(0);
   const lastRemoteApplyAtRef = useRef<number>(0);
   const desirePlayingRef = useRef<boolean | null>(null);
   const isHost = isHostClient();
-  const partyStartSec =
-    partyState?.enabled && partyState.media_id === item.id && partyState.current_time >= 3
-      ? partyState.current_time
-      : 0;
-  const initialResumeRef = useRef<number>(
-    partyStartSec > 0
-      ? partyStartSec
-      : initialProgress && initialProgress.currentTime > 5 && initialProgress.percent < 96
-      ? initialProgress.currentTime
-      : 0
-  );
+  const latestPartyStateRef = useRef(partyState);
+  latestPartyStateRef.current = partyState;
+  const latestInitialProgressRef = useRef(initialProgress);
+  latestInitialProgressRef.current = initialProgress;
 
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number>(() => {
     return item.metadata?.audio_tracks?.[0]?.index ?? 0;
@@ -152,7 +148,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [volume, setVolume] = useState<number>(1);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
+  const playbackRateRef = useRef<number>(playbackRate);
+  playbackRateRef.current = playbackRate;
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  const safePlay = useCallback((video: HTMLVideoElement, fromUserAction: boolean = false) => {
+    if (fromUserAction) {
+      autoplayBlockedRef.current = false;
+    } else if (autoplayBlockedRef.current) {
+      return;
+    }
+    const gen = streamGenRef.current;
+    video.play().catch((err) => {
+      if (streamGenRef.current !== gen) return;
+      const errName = (err as { name?: string })?.name;
+      if (errName === 'AbortError') return;
+      if (errName === 'NotAllowedError') {
+        autoplayBlockedRef.current = true;
+        setStreamStatus('TAP PLAY ▶');
+        setControlsVisible(true);
+        return;
+      }
+      console.warn('Video playback failed:', err);
+    });
+  }, []);
   const [hoverTime, setHoverTime] = useState<{ time: number; percent: number } | null>(null);
 
   // Custom rendered subtitle text & user-customizable settings
@@ -214,9 +233,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
 
       const startOffset = resumeTime >= 3 ? Math.floor(resumeTime) : 0;
+      const gen = ++streamGenRef.current;
       streamOffsetRef.current = startOffset;
       isStreamReadyRef.current = false;
+      streamReadyAtRef.current = 0;
       lastSeekRestartAtRef.current = Date.now();
+      video.playbackRate = playbackRateRef.current;
       setCurrentTime(startOffset > 0 ? startOffset : resumeTime);
       setBufferedEnd(0);
       setStreamStatus('CONNECTING');
@@ -256,34 +278,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          isStreamReadyRef.current = true;
-          setStreamStatus('STREAMING');
+          if (streamGenRef.current !== gen) return;
+          setStreamStatus('BUFFERING...');
           if (startOffset === 0 && resumeTime > 0 && resumeTime < 3) {
             video.currentTime = resumeTime;
           }
           const shouldPlay = desirePlayingRef.current !== false;
           desirePlayingRef.current = null;
           if (shouldPlay) {
-            video.play().catch((err) => {
-              console.log('Autoplay prevented or waiting for interaction:', err);
-              setStreamStatus('TAP PLAY ▶');
-              setControlsVisible(true);
-            });
+            safePlay(video);
           } else {
             video.pause();
           }
         });
 
-        hls.on(Hls.Events.LEVEL_LOADED, () => {
-          isStreamReadyRef.current = true;
-          setStreamStatus((prev) =>
-            prev === 'CONNECTING' || prev.startsWith('RETRYING') ? 'STREAMING' : prev
-          );
-        });
-
         hls.on(Hls.Events.FRAG_BUFFERED, () => {
-          isStreamReadyRef.current = true;
-          setStreamStatus('STREAMING');
+          if (streamGenRef.current !== gen) return;
+          if (!isStreamReadyRef.current) {
+            isStreamReadyRef.current = true;
+            streamReadyAtRef.current = Date.now();
+          }
+          setStreamStatus((prev) => (prev === 'TAP PLAY ▶' ? prev : 'STREAMING'));
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -332,7 +347,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         video.addEventListener(
           'loadedmetadata',
           () => {
+            if (streamGenRef.current !== gen) return;
             isStreamReadyRef.current = true;
+            streamReadyAtRef.current = Date.now();
             setStreamStatus('STREAMING');
             if (startOffset === 0 && resumeTime > 0 && resumeTime < 3) {
               video.currentTime = resumeTime;
@@ -340,11 +357,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             const shouldPlay = desirePlayingRef.current !== false;
             desirePlayingRef.current = null;
             if (shouldPlay) {
-              video.play().catch((err) => {
-                console.log('Autoplay prevented on Safari:', err);
-                setStreamStatus('TAP PLAY ▶');
-                setControlsVisible(true);
-              });
+              safePlay(video);
             } else {
               video.pause();
             }
@@ -355,7 +368,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         setPlayerError('FATAL: BROWSER ENVIRONMENT DOES NOT SUPPORT HLS PLAYBACK');
       }
     },
-    [item.id]
+    [item.id, safePlay]
   );
 
   // Initialize playback on mount or when media item changes
@@ -363,11 +376,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const initialAudio = item.metadata?.audio_tracks?.[0]?.index ?? 0;
     setSelectedAudioIndex(initialAudio);
     setDuration(item.metadata?.duration_seconds ?? 0);
-    const startAt = initialResumeRef.current;
+
+    const p = latestPartyStateRef.current;
+    const prog = latestInitialProgressRef.current;
+    const startAt =
+      p?.enabled && p.media_id === item.id && p.current_time >= 3
+        ? p.current_time
+        : prog && prog.currentTime > 5 && prog.percent < 96
+        ? prog.currentTime
+        : 0;
+
+    if (p?.enabled && p.media_id === item.id) {
+      desirePlayingRef.current = p.is_playing;
+      lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, p.event_seq ?? 0);
+    } else {
+      desirePlayingRef.current = null;
+    }
+    autoplayBlockedRef.current = false;
     setCurrentTime(startAt);
     initStream(initialAudio, startAt);
 
     return () => {
+      streamGenRef.current += 1;
       if (pendingSeekTimerRef.current !== null) {
         window.clearTimeout(pendingSeekTimerRef.current);
         pendingSeekTimerRef.current = null;
@@ -402,8 +432,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     const onPlay = () => {
       autoNextTriggeredRef.current = false;
+      autoplayBlockedRef.current = false;
       setIsPlaying(true);
       setStreamStatus('STREAMING');
+    };
+    const onCanPlay = () => {
+      if (!isStreamReadyRef.current) {
+        isStreamReadyRef.current = true;
+        streamReadyAtRef.current = Date.now();
+      }
     };
     const onPause = () => {
       setIsPlaying(false);
@@ -460,6 +497,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
 
     video.addEventListener('play', onPlay);
+    video.addEventListener('canplay', onCanPlay);
     video.addEventListener('pause', onPause);
     video.addEventListener('ended', onEnded);
     video.addEventListener('timeupdate', onTimeUpdate);
@@ -468,6 +506,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     return () => {
       video.removeEventListener('play', onPlay);
+      video.removeEventListener('canplay', onCanPlay);
       video.removeEventListener('pause', onPause);
       video.removeEventListener('ended', onEnded);
       video.removeEventListener('timeupdate', onTimeUpdate);
@@ -593,11 +632,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           lastRemoteApplyAtRef.current = Date.now();
           desirePlayingRef.current = party.is_playing;
 
-          if (Math.abs(moviePos - party.current_time) > 1.5) {
+          const localTarget = party.current_time - streamOffsetRef.current;
+          const canSeekLocally = isLocalTimeSeekable(video, localTarget);
+          const signedDrift = party.current_time - moviePos;
+          const needsSeek =
+            (canSeekLocally && Math.abs(signedDrift) > 1.5) ||
+            signedDrift < -2.5 ||
+            signedDrift > 8.0;
+
+          if (needsSeek) {
             applyMovieSeek(party.current_time, true, false, party.is_playing);
           } else if (isStreamReadyRef.current) {
             if (party.is_playing && video.paused) {
-              video.play().catch(() => {});
+              safePlay(video);
             } else if (!party.is_playing && !video.paused) {
               video.pause();
             }
@@ -619,18 +666,57 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           return;
         }
 
-        // Watch Party guests follow host's anchor clock once stream is settled
-        if (!isStreamReadyRef.current || Date.now() - lastSeekRestartAtRef.current <= 4000) {
+        // Wait until first segment is buffered and settled before evaluating guest drift
+        const settledSince = Math.max(lastSeekRestartAtRef.current, streamReadyAtRef.current);
+        if (!isStreamReadyRef.current || streamReadyAtRef.current === 0 || Date.now() - settledSince <= 4000) {
           return;
         }
 
         if (party.is_playing && video.paused) {
-          video.play().catch(() => {});
+          safePlay(video);
         } else if (!party.is_playing && !video.paused) {
           video.pause();
         }
 
-        if (Math.abs(moviePos - party.current_time) > 2.5) {
+        const signedDrift = party.current_time - moviePos;
+        const absDrift = Math.abs(signedDrift);
+        const localTarget = party.current_time - streamOffsetRef.current;
+
+        if (!party.is_playing) {
+          if (
+            absDrift > 2.5 &&
+            (isLocalTimeSeekable(video, localTarget) || Date.now() - lastSeekRestartAtRef.current > 8000)
+          ) {
+            video.playbackRate = playbackRateRef.current;
+            applyMovieSeek(party.current_time, true, false, false);
+          }
+          return;
+        }
+
+        if (absDrift <= 4.0) {
+          if (Math.abs(video.playbackRate - playbackRateRef.current) > 0.01) {
+            video.playbackRate = playbackRateRef.current;
+          }
+          return;
+        }
+
+        // Smooth catch-up in moderate drift band (4s..12s) without restarting FFmpeg
+        if (absDrift <= 12.0) {
+          if (isLocalTimeSeekable(video, localTarget) && absDrift > 5.0) {
+            video.currentTime = localTarget;
+            video.playbackRate = playbackRateRef.current;
+          } else {
+            const nudge = signedDrift > 0 ? 1.08 : 0.92;
+            const targetRate = Math.min(2.0, Math.max(0.5, playbackRateRef.current * nudge));
+            if (Math.abs(video.playbackRate - targetRate) > 0.01) {
+              video.playbackRate = targetRate;
+            }
+          }
+          return;
+        }
+
+        if (isLocalTimeSeekable(video, localTarget) || Date.now() - lastSeekRestartAtRef.current > 8000) {
+          video.playbackRate = playbackRateRef.current;
           applyMovieSeek(party.current_time, true, false, party.is_playing);
         }
       } catch {
@@ -639,7 +725,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 1000);
 
     return () => window.clearInterval(syncInterval);
-  }, [partySyncEnabled, isWatchPartyActive, isHost, item.id, broadcastPartyUpdate, applyMovieSeek]);
+  }, [partySyncEnabled, isWatchPartyActive, isHost, item.id, broadcastPartyUpdate, applyMovieSeek, safePlay]);
 
   const handleRefreshParty = useCallback(async () => {
     setIsSyncingParty(true);
@@ -656,7 +742,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           applyMovieSeek(party.current_time, true, false, party.is_playing);
         } else {
           if (party.is_playing && video.paused) {
-            video.play().catch(() => {});
+            safePlay(video, true);
           } else if (!party.is_playing && !video.paused) {
             video.pause();
           }
@@ -667,7 +753,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     } finally {
       setTimeout(() => setIsSyncingParty(false), 600);
     }
-  }, [item.id, applyMovieSeek]);
+  }, [item.id, applyMovieSeek, safePlay]);
 
   // Transport actions
   const togglePlay = useCallback(() => {
@@ -676,14 +762,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const moviePos = streamOffsetRef.current + video.currentTime;
     if (video.paused) {
       desirePlayingRef.current = true;
-      video.play().catch(console.error);
+      safePlay(video, true);
       broadcastPartyUpdate(true, moviePos, false);
     } else {
       desirePlayingRef.current = false;
       video.pause();
       broadcastPartyUpdate(false, moviePos, false);
     }
-  }, [broadcastPartyUpdate]);
+  }, [broadcastPartyUpdate, safePlay]);
 
   const seekBy = useCallback(
     (deltaSeconds: number) => {
@@ -696,10 +782,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const maxDur = duration > 0 ? duration : vidDur;
       const curMovie = streamOffsetRef.current + video.currentTime;
       const next = Math.max(0, Math.min(maxDur || Infinity, curMovie + deltaSeconds));
-      applyMovieSeek(next, true, true, isPlaying);
+      const wantPlay = desirePlayingRef.current ?? !video.paused;
+      applyMovieSeek(next, true, true, wantPlay);
       resetControlsHideTimer();
     },
-    [duration, isPlaying, resetControlsHideTimer, applyMovieSeek]
+    [duration, resetControlsHideTimer, applyMovieSeek]
   );
 
   const seekTo = useCallback(
@@ -707,9 +794,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const video = videoRef.current;
       if (!video) return;
       const clamped = Math.max(0, targetSeconds);
-      applyMovieSeek(clamped, false, true, isPlaying);
+      const wantPlay = desirePlayingRef.current ?? !video.paused;
+      applyMovieSeek(clamped, false, true, wantPlay);
     },
-    [isPlaying, applyMovieSeek]
+    [applyMovieSeek]
   );
 
   // Fetch chapters for the current media item
@@ -1016,7 +1104,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               ref={videoRef}
               className="player-video-element"
               playsInline
-              autoPlay
             />
 
             {/* Netflix-style Skip Intro / Skip Credits / Next Episode floating button */}
