@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import Hls from 'hls.js';
 import { ChapterMarker, MediaItem, PartyState, ServerStatus, AudioTrack, SubtitleTrack } from '../types/media';
-import { api, getPeerId } from '../api/client';
+import { api, getOrCaptureInviteToken, getPeerId } from '../api/client';
 import { VideoProgressEntry, WatchProgressMap } from '../utils/watchProgress';
 
 interface VideoPlayerProps {
@@ -63,6 +63,16 @@ function formatTime(secs: number): string {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
+function isLocalTimeSeekable(video: HTMLVideoElement, localSec: number): boolean {
+  if (!Number.isFinite(localSec) || localSec < 0) return false;
+  for (let i = 0; i < video.seekable.length; i++) {
+    if (localSec >= video.seekable.start(i) && localSec <= video.seekable.end(i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   item,
   serverStatus,
@@ -90,8 +100,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const hlsRef = useRef<Hls | null>(null);
   const seekBarRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number | null>(null);
+  const streamOffsetRef = useRef<number>(0);
+  const pendingSeekTimerRef = useRef<number | null>(null);
+  const partyStartSec =
+    partyState?.enabled && partyState.media_id === item.id && partyState.current_time > 5
+      ? partyState.current_time
+      : 0;
   const initialResumeRef = useRef<number>(
-    initialProgress && initialProgress.currentTime > 5 && initialProgress.percent < 96
+    partyStartSec > 0
+      ? partyStartSec
+      : initialProgress && initialProgress.currentTime > 5 && initialProgress.percent < 96
       ? initialProgress.currentTime
       : 0
   );
@@ -99,6 +117,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number>(() => {
     return item.metadata?.audio_tracks?.[0]?.index ?? 0;
   });
+  const selectedAudioRef = useRef<number>(selectedAudioIndex);
+  selectedAudioRef.current = selectedAudioIndex;
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
   const [streamStatus, setStreamStatus] = useState<string>('CONNECTING');
   const [playerError, setPlayerError] = useState<string | null>(null);
@@ -172,32 +192,56 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [isPlaying, activePopover, resetControlsHideTimer]);
 
-  // Initialize or reload HLS stream
+  // Initialize or reload HLS stream starting from resumeTime (seconds in source file)
   const initStream = useCallback(
     (audioIdx: number, resumeTime: number = 0) => {
       const video = videoRef.current;
       if (!video) return;
+
+      if (pendingSeekTimerRef.current !== null) {
+        window.clearTimeout(pendingSeekTimerRef.current);
+        pendingSeekTimerRef.current = null;
+      }
 
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
 
+      const startOffset = resumeTime >= 10 ? Math.floor(resumeTime) : 0;
+      streamOffsetRef.current = startOffset;
+      setCurrentTime(startOffset > 0 ? startOffset : resumeTime);
+      setBufferedEnd(0);
       setStreamStatus('CONNECTING');
       setPlayerError(null);
 
-      const streamUrl = api.getMasterStreamUrl(item.id, audioIdx);
+      const streamUrl = api.getMasterStreamUrl(item.id, audioIdx, startOffset);
 
       if (Hls.isSupported()) {
+        let fatalNetworkRetries = 0;
+        let fatalMediaRetries = 0;
+
         const hls = new Hls({
-          enableWorker: true,
+          enableWorker: false,
           lowLatencyMode: false,
           startFragPrefetch: true,
           maxBufferLength: 30,
           backBufferLength: 30,
-          manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 6,
-          manifestLoadingRetryDelay: 300,
+          manifestLoadingTimeOut: 30000,
+          manifestLoadingMaxRetry: 10,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingTimeOut: 30000,
+          levelLoadingMaxRetry: 10,
+          levelLoadingRetryDelay: 1000,
+          fragLoadingTimeOut: 30000,
+          fragLoadingMaxRetry: 8,
+          fragLoadingRetryDelay: 1000,
+          xhrSetup: (xhr) => {
+            const invite = getOrCaptureInviteToken();
+            if (invite) {
+              xhr.setRequestHeader('x-monolith-invite', invite);
+            }
+          },
         });
         hlsRef.current = hls;
 
@@ -206,12 +250,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setStreamStatus('STREAMING');
-          if (resumeTime > 0) {
+          if (startOffset === 0 && resumeTime > 0 && resumeTime < 10) {
             video.currentTime = resumeTime;
           }
           video.play().catch((err) => {
             console.log('Autoplay prevented or waiting for interaction:', err);
+            setStreamStatus('TAP PLAY ▶');
+            setControlsVisible(true);
           });
+        });
+
+        hls.on(Hls.Events.LEVEL_LOADED, () => {
+          setStreamStatus((prev) =>
+            prev === 'CONNECTING' || prev.startsWith('RETRYING') ? 'STREAMING' : prev
+          );
+        });
+
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          setStreamStatus('STREAMING');
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -219,12 +275,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             console.error('Fatal HLS error encountered:', data);
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
-                setStreamStatus('RETRYING NETWORK CHUNK...');
-                hls.startLoad();
+                fatalNetworkRetries += 1;
+                if (fatalNetworkRetries <= 4) {
+                  setStreamStatus(`RETRYING STREAM (${fatalNetworkRetries}/4)...`);
+                  if (
+                    data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+                    data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT
+                  ) {
+                    hls.loadSource(streamUrl);
+                  } else {
+                    hls.startLoad();
+                  }
+                } else {
+                  setStreamStatus('ERROR');
+                  setPlayerError(`NETWORK ERROR: ${data.details.toUpperCase()}`);
+                  hls.destroy();
+                }
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
-                setStreamStatus('RECOVERING MEDIA BUFFER...');
-                hls.recoverMediaError();
+                fatalMediaRetries += 1;
+                if (fatalMediaRetries <= 3) {
+                  setStreamStatus('RECOVERING MEDIA BUFFER...');
+                  hls.recoverMediaError();
+                } else {
+                  setStreamStatus('ERROR');
+                  setPlayerError(`MEDIA DECODER ERROR: ${data.details.toUpperCase()}`);
+                  hls.destroy();
+                }
                 break;
               default:
                 setStreamStatus('ERROR');
@@ -240,10 +317,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           'loadedmetadata',
           () => {
             setStreamStatus('STREAMING');
-            if (resumeTime > 0) {
+            if (startOffset === 0 && resumeTime > 0 && resumeTime < 10) {
               video.currentTime = resumeTime;
             }
-            video.play().catch(console.error);
+            video.play().catch((err) => {
+              console.log('Autoplay prevented on Safari:', err);
+              setStreamStatus('TAP PLAY ▶');
+              setControlsVisible(true);
+            });
           },
           { once: true }
         );
@@ -264,12 +345,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     initStream(initialAudio, startAt);
 
     return () => {
+      if (pendingSeekTimerRef.current !== null) {
+        window.clearTimeout(pendingSeekTimerRef.current);
+        pendingSeekTimerRef.current = null;
+      }
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
     };
   }, [initStream, item.id, item.metadata]);
+
+  const syncCustomSubtitles = useCallback((video: HTMLVideoElement, movieTime: number) => {
+    const activeTrack = Array.from(video.textTracks).find((t) => t.mode === 'hidden');
+    if (!activeTrack?.cues) {
+      setActiveCueText('');
+      return;
+    }
+    const lines: string[] = [];
+    for (let i = 0; i < activeTrack.cues.length; i++) {
+      const cue = activeTrack.cues[i] as VTTCue;
+      if (movieTime >= cue.startTime && movieTime <= cue.endTime && cue.text) {
+        lines.push(cue.text.replace(/<[^>]+>/g, ''));
+      }
+    }
+    setActiveCueText(lines.join('\n'));
+  }, []);
 
   // Attach HTML5 video event listeners for custom HUD state
   useEffect(() => {
@@ -279,6 +380,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const onPlay = () => {
       autoNextTriggeredRef.current = false;
       setIsPlaying(true);
+      setStreamStatus('STREAMING');
     };
     const onPause = () => {
       setIsPlaying(false);
@@ -291,13 +393,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       }
     };
     const onTimeUpdate = () => {
-      const cur = video.currentTime;
+      const cur = streamOffsetRef.current + video.currentTime;
       setCurrentTime(cur);
+      if (streamOffsetRef.current > 0) {
+        syncCustomSubtitles(video, cur);
+      }
       if (video.buffered.length > 0) {
-        setBufferedEnd(video.buffered.end(video.buffered.length - 1));
+        setBufferedEnd(streamOffsetRef.current + video.buffered.end(video.buffered.length - 1));
       }
       const metaDur = item.metadata?.duration_seconds ?? 0;
-      const vidDur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const vidDur =
+        Number.isFinite(video.duration) && video.duration > 0
+          ? streamOffsetRef.current + video.duration
+          : 0;
       const effDur = Math.max(metaDur, vidDur);
       if (effDur > 0 && cur > 1) {
         onProgressUpdate?.(item.id, cur, effDur);
@@ -316,7 +424,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
     const onDurationChange = () => {
       const metaDur = item.metadata?.duration_seconds ?? 0;
-      const vidDur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const vidDur =
+        Number.isFinite(video.duration) && video.duration > 0
+          ? streamOffsetRef.current + video.duration
+          : 0;
       setDuration(Math.max(metaDur, vidDur));
     };
     const onVolumeChange = () => {
@@ -339,7 +450,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.removeEventListener('durationchange', onDurationChange);
       video.removeEventListener('volumechange', onVolumeChange);
     };
-  }, [item.id, item.metadata?.duration_seconds, onProgressUpdate, autoNext, nextItem, onSelectItem]);
+  }, [
+    item.id,
+    item.metadata?.duration_seconds,
+    onProgressUpdate,
+    autoNext,
+    nextItem,
+    onSelectItem,
+    syncCustomSubtitles,
+  ]);
 
   // Sync fullscreen state
   useEffect(() => {
@@ -369,6 +488,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     [partySyncEnabled, item.id, item.file_name]
   );
 
+  const applyMovieSeek = useCallback(
+    (movieTarget: number, immediate: boolean = false) => {
+      const video = videoRef.current;
+      if (!video) return;
+      const localTarget = movieTarget - streamOffsetRef.current;
+      if (isLocalTimeSeekable(video, localTarget)) {
+        video.currentTime = localTarget;
+        setCurrentTime(movieTarget);
+        return;
+      }
+      setCurrentTime(movieTarget);
+      if (pendingSeekTimerRef.current !== null) {
+        window.clearTimeout(pendingSeekTimerRef.current);
+        pendingSeekTimerRef.current = null;
+      }
+      if (immediate) {
+        initStream(selectedAudioRef.current, movieTarget);
+      } else {
+        pendingSeekTimerRef.current = window.setTimeout(() => {
+          pendingSeekTimerRef.current = null;
+          initStream(selectedAudioRef.current, movieTarget);
+        }, 220);
+      }
+    },
+    [initStream]
+  );
+
   // Poll Watch Party state for shared-control playback synchronization
   useEffect(() => {
     if (!partySyncEnabled || !isWatchPartyActive) return;
@@ -383,7 +529,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
         // If Watch Party was just toggled on while this video is open, register this media item
         if (!party.media_id && videoRef.current) {
-          broadcastPartyUpdate(!videoRef.current.paused, videoRef.current.currentTime);
+          broadcastPartyUpdate(
+            !videoRef.current.paused,
+            streamOffsetRef.current + videoRef.current.currentTime
+          );
           return;
         }
 
@@ -391,14 +540,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         const video = videoRef.current;
         if (!video) return;
 
+        const moviePos = streamOffsetRef.current + video.currentTime;
         const isNewRemoteEvent =
           party.event_seq > lastAppliedSeqRef.current && party.updated_by !== myPeerId;
 
         if (isNewRemoteEvent) {
           lastAppliedSeqRef.current = party.event_seq;
-          if (Math.abs(video.currentTime - party.current_time) > 1.2) {
-            video.currentTime = party.current_time;
-            setCurrentTime(party.current_time);
+          if (Math.abs(moviePos - party.current_time) > 1.5) {
+            applyMovieSeek(party.current_time, true);
           }
           if (party.is_playing && video.paused) {
             video.play().catch(() => {});
@@ -406,10 +555,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             video.pause();
           }
         } else if (party.is_playing && !video.paused) {
-          // Drift correction if a viewer falls >2.5s behind the room
-          if (Math.abs(video.currentTime - party.current_time) > 2.5) {
-            video.currentTime = party.current_time;
-            setCurrentTime(party.current_time);
+          // Drift correction if a viewer falls >3s behind the room
+          if (Math.abs(moviePos - party.current_time) > 3.0) {
+            applyMovieSeek(party.current_time, true);
           }
         }
       } catch {
@@ -418,7 +566,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }, 1000);
 
     return () => window.clearInterval(syncInterval);
-  }, [partySyncEnabled, isWatchPartyActive, item.id, broadcastPartyUpdate]);
+  }, [partySyncEnabled, isWatchPartyActive, item.id, broadcastPartyUpdate, applyMovieSeek]);
 
   const handleRefreshParty = useCallback(async () => {
     setIsSyncingParty(true);
@@ -428,9 +576,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const video = videoRef.current;
       if (video && party.media_id === item.id) {
         lastAppliedSeqRef.current = party.event_seq;
-        if (Math.abs(video.currentTime - party.current_time) > 0.4) {
-          video.currentTime = party.current_time;
-          setCurrentTime(party.current_time);
+        const moviePos = streamOffsetRef.current + video.currentTime;
+        if (Math.abs(moviePos - party.current_time) > 1.0) {
+          applyMovieSeek(party.current_time, true);
         }
         if (party.is_playing && video.paused) {
           video.play().catch(() => {});
@@ -443,18 +591,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     } finally {
       setTimeout(() => setIsSyncingParty(false), 600);
     }
-  }, [item.id]);
+  }, [item.id, applyMovieSeek]);
 
   // Transport actions
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    const moviePos = streamOffsetRef.current + video.currentTime;
     if (video.paused) {
       video.play().catch(console.error);
-      broadcastPartyUpdate(true, video.currentTime);
+      broadcastPartyUpdate(true, moviePos);
     } else {
       video.pause();
-      broadcastPartyUpdate(false, video.currentTime);
+      broadcastPartyUpdate(false, moviePos);
     }
   }, [broadcastPartyUpdate]);
 
@@ -462,25 +611,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     (deltaSeconds: number) => {
       const video = videoRef.current;
       if (!video) return;
-      const maxDur = duration > 0 ? duration : video.duration || 0;
-      const next = Math.max(0, Math.min(maxDur || Infinity, video.currentTime + deltaSeconds));
-      video.currentTime = next;
-      setCurrentTime(next);
+      const vidDur =
+        Number.isFinite(video.duration) && video.duration > 0
+          ? streamOffsetRef.current + video.duration
+          : 0;
+      const maxDur = duration > 0 ? duration : vidDur;
+      const curMovie = streamOffsetRef.current + video.currentTime;
+      const next = Math.max(0, Math.min(maxDur || Infinity, curMovie + deltaSeconds));
+      applyMovieSeek(next, true);
       resetControlsHideTimer();
       broadcastPartyUpdate(!video.paused, next);
     },
-    [duration, resetControlsHideTimer, broadcastPartyUpdate]
+    [duration, resetControlsHideTimer, broadcastPartyUpdate, applyMovieSeek]
   );
 
   const seekTo = useCallback(
     (targetSeconds: number) => {
       const video = videoRef.current;
       if (!video) return;
-      video.currentTime = targetSeconds;
-      setCurrentTime(targetSeconds);
-      broadcastPartyUpdate(!video.paused, targetSeconds);
+      const clamped = Math.max(0, targetSeconds);
+      applyMovieSeek(clamped, false);
+      broadcastPartyUpdate(!video.paused, clamped);
     },
-    [broadcastPartyUpdate]
+    [broadcastPartyUpdate, applyMovieSeek]
   );
 
   // Fetch chapters for the current media item
@@ -686,6 +839,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         const syncCues = () => {
           const tt = trackEl.track;
           tt.mode = 'hidden'; // Render via our customizable subtitle overlay instead of browser default
+          if (streamOffsetRef.current > 0) {
+            syncCustomSubtitles(video, streamOffsetRef.current + video.currentTime);
+            return;
+          }
           const cues = tt.activeCues;
           if (cues && cues.length > 0) {
             const lines: string[] = [];
@@ -730,7 +887,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     const video = videoRef.current;
-    const resumePos = video ? video.currentTime : 0;
+    const resumePos = streamOffsetRef.current + (video ? video.currentTime : 0);
 
     setSelectedAudioIndex(index);
     initStream(index, resumePos);

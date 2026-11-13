@@ -120,6 +120,8 @@ strong {
 /* Layout Container with Subtle Cyber-Sigil Etched Grid Background */
 .app-container {
   min-height: 100dvh;
+  max-width: 100%;
+  overflow-x: clip;
   display: flex;
   flex-direction: column;
   background-color: #000000;
@@ -579,6 +581,8 @@ strong {
 .app-main {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
   padding: 6px 10px;
   display: flex;
   flex-direction: column;
@@ -614,6 +618,8 @@ strong {
   align-items: center;
   gap: 10px;
   position: relative;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .party-live-banner::before,
@@ -644,7 +650,10 @@ strong {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px 10px;
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .party-media-title {
@@ -653,6 +662,11 @@ strong {
   font-size: 0.95rem;
   letter-spacing: 0.04em;
   color: #ffffff;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.3;
 }
 
 .party-status-time {
@@ -667,6 +681,8 @@ strong {
   flex-direction: column;
   gap: 8px;
   flex: 1;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .browser-toolbar {
@@ -1611,6 +1627,9 @@ strong {
 /* On-Video Center Transport Controls */
 .on-video-center-controls {
   position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   z-index: 12;
   display: flex;
   align-items: center;

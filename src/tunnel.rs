@@ -93,6 +93,17 @@ impl Default for TunnelManager {
     }
 }
 
+fn generate_short_token() -> String {
+    Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+fn configured_public_url() -> Option<String> {
+    std::env::var("MONOLITH_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| s.starts_with("https://") || s.starts_with("http://"))
+}
+
 impl TunnelManager {
     pub fn new() -> Self {
         let (status_tx, _) = watch::channel(0u64);
@@ -102,7 +113,7 @@ impl TunnelManager {
                 status: "OFFLINE".to_string(),
                 provider: TunnelProvider::Cloudflare,
                 public_url: None,
-                invite_token: Uuid::new_v4().simple().to_string(),
+                invite_token: generate_short_token(),
                 error: None,
                 child: None,
                 attempt_id: 0,
@@ -125,16 +136,17 @@ impl TunnelManager {
 
     pub async fn get_status(&self) -> TunnelStatus {
         let guard = self.inner.read().await;
-        let invite_url = guard
-            .public_url
+        let effective_base = configured_public_url().or_else(|| guard.public_url.clone());
+        let invite_url = effective_base
             .as_ref()
-            .map(|url| format!("{}/?invite={}", url.trim_end_matches('/'), guard.invite_token));
+            .filter(|_| guard.public_url.is_some() || configured_public_url().is_some())
+            .map(|url| format!("{}/w/{}", url.trim_end_matches('/'), guard.invite_token));
 
         TunnelStatus {
             active: guard.active,
             status: guard.status.clone(),
             provider: guard.provider.label().to_string(),
-            public_url: guard.public_url.clone(),
+            public_url: effective_base,
             invite_token: guard.invite_token.clone(),
             invite_url,
             error: guard.error.clone(),
@@ -152,7 +164,7 @@ impl TunnelManager {
     pub async fn rotate_token(&self) -> TunnelStatus {
         {
             let mut guard = self.inner.write().await;
-            guard.invite_token = Uuid::new_v4().simple().to_string();
+            guard.invite_token = generate_short_token();
         }
         self.get_status().await
     }
@@ -185,7 +197,7 @@ impl TunnelManager {
             guard.public_url = None;
             guard.error = None;
             // Invalidate invite token immediately so any existing link becomes invalid
-            guard.invite_token = Uuid::new_v4().simple().to_string();
+            guard.invite_token = generate_short_token();
         }
         self.notify_status_change();
         self.get_status().await

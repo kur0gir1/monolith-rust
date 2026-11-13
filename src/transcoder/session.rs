@@ -10,7 +10,7 @@ use crate::error::AppError;
 use crate::metadata::find_ffmpeg;
 use crate::models::{HlsStreamInfo, TranscodeMode};
 use crate::transcoder::nvenc::probe_nvenc_available;
-use crate::transcoder::pipeline::build_ffmpeg_transcode_args;
+use crate::transcoder::pipeline::build_ffmpeg_transcode_args_from;
 
 pub struct ActiveSession {
     pub session_id: String,
@@ -19,6 +19,7 @@ pub struct ActiveSession {
     pub mode: TranscodeMode,
     pub temp_dir: PathBuf,
     pub active_audio_index: u32,
+    pub start_seconds: u64,
     pub child: Option<tokio::process::Child>,
     pub created_at: Instant,
     pub last_accessed: Instant,
@@ -64,12 +65,28 @@ impl SessionManager {
         audio_index: u32,
         video_codec: Option<&str>,
     ) -> Result<HlsStreamInfo, AppError> {
+        self.start_or_get_session_at(media_id, media_path, audio_index, video_codec, 0)
+            .await
+    }
+
+    /// Starts or resumes an HLS transcoding session starting at `start_seconds`.
+    pub async fn start_or_get_session_at(
+        &self,
+        media_id: &str,
+        media_path: &Path,
+        audio_index: u32,
+        video_codec: Option<&str>,
+        start_seconds: u64,
+    ) -> Result<HlsStreamInfo, AppError> {
         let mut map = self.sessions.write().await;
 
         if let Some(session) = map.get_mut(media_id) {
             session.last_accessed = Instant::now();
             let playlist_check = session.temp_dir.join("index.m3u8");
-            if session.active_audio_index == audio_index && playlist_check.exists() {
+            if session.active_audio_index == audio_index
+                && session.start_seconds == start_seconds
+                && playlist_check.exists()
+            {
                 return Ok(HlsStreamInfo {
                     session_id: session.session_id.clone(),
                     master_playlist_url: format!("/api/stream/{}/master.m3u8", media_id),
@@ -82,8 +99,8 @@ impl SessionManager {
                 });
             } else {
                 info!(
-                    "Restarting or re-mapping stream for media {} (audio {})...",
-                    media_id, audio_index
+                    "Restarting or re-mapping stream for media {} (audio {}, start {}s)...",
+                    media_id, audio_index, start_seconds
                 );
                 // Stop current transcode child
                 if let Some(mut child) = session.child.take() {
@@ -93,7 +110,7 @@ impl SessionManager {
         }
 
         // Create dedicated temporary directory for this session
-        let session_id = format!("monolith_{}_{}", media_id, audio_index);
+        let session_id = format!("monolith_{}_{}_{}", media_id, audio_index, start_seconds);
         let temp_dir = std::env::temp_dir().join(&session_id);
         if temp_dir.exists() {
             let _ = fs::remove_dir_all(&temp_dir);
@@ -122,16 +139,17 @@ impl SessionManager {
         for mode in candidate_modes {
             let _ = fs::remove_file(&playlist_path);
             let mut args = vec!["-y".to_string(), "-v".to_string(), "error".to_string()];
-            args.extend(build_ffmpeg_transcode_args(
+            args.extend(build_ffmpeg_transcode_args_from(
                 &mode,
                 media_path,
                 &playlist_path,
                 audio_index,
+                start_seconds,
             ));
 
             info!(
-                "Spawning FFmpeg transcoding session {} (mode: {:?}, audio: {})",
-                session_id, mode, audio_index
+                "Spawning FFmpeg transcoding session {} (mode: {:?}, audio: {}, start: {}s)",
+                session_id, mode, audio_index, start_seconds
             );
 
             let mut cmd = tokio::process::Command::new(&ffmpeg);
@@ -150,7 +168,7 @@ impl SessionManager {
             let start = Instant::now();
             let mut ready = false;
             let mut exited_early = false;
-            while start.elapsed() < Duration::from_secs(10) {
+            while start.elapsed() < Duration::from_secs(25) {
                 if playlist_path.exists() {
                     if let Ok(content) = fs::read_to_string(&playlist_path) {
                         if content.contains(".ts") {
@@ -194,6 +212,7 @@ impl SessionManager {
             mode: active_mode.clone(),
             temp_dir,
             active_audio_index: audio_index,
+            start_seconds,
             child: spawned_child,
             created_at: Instant::now(),
             last_accessed: Instant::now(),

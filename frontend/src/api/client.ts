@@ -3,23 +3,33 @@ import { ChapterMarker, MediaItem, PartyState, ServerStatus, TunnelStatus } from
 const INVITE_STORAGE_KEY = 'monolith_invite_token_v1';
 const PEER_ID_STORAGE_KEY = 'monolith_peer_id_v1';
 
-// Capture `?invite=<token>` from URL query string if present and persist in storage + cookie
+export function extractInviteFromPathname(pathname: string): string | null {
+  const match = pathname.match(/^\/(?:w|tv)\/([A-Za-z0-9_-]+)/);
+  return match?.[1] ? match[1].trim() : null;
+}
+
+// Capture `?invite=<token>` or `/w/<token>` from URL if present and persist in storage + cookie
 export function getOrCaptureInviteToken(): string | null {
   if (typeof window === 'undefined') return null;
 
+  const cookieFlags =
+    window.location.protocol === 'https:'
+      ? 'path=/; max-age=86400; SameSite=Lax; Secure'
+      : 'path=/; max-age=86400; SameSite=Lax';
+
   try {
     const params = new URLSearchParams(window.location.search);
-    const urlInvite = params.get('invite');
+    const urlInvite = params.get('invite') || extractInviteFromPathname(window.location.pathname);
     if (urlInvite && urlInvite.trim().length > 0) {
       const clean = urlInvite.trim();
       localStorage.setItem(INVITE_STORAGE_KEY, clean);
-      document.cookie = `monolith_invite=${encodeURIComponent(clean)}; path=/; SameSite=Lax`;
+      document.cookie = `monolith_invite=${encodeURIComponent(clean)}; ${cookieFlags}`;
       return clean;
     }
 
     const saved = localStorage.getItem(INVITE_STORAGE_KEY);
     if (saved && saved.trim().length > 0) {
-      document.cookie = `monolith_invite=${encodeURIComponent(saved.trim())}; path=/; SameSite=Lax`;
+      document.cookie = `monolith_invite=${encodeURIComponent(saved.trim())}; ${cookieFlags}`;
       return saved.trim();
     }
   } catch {
@@ -32,9 +42,13 @@ export function getOrCaptureInviteToken(): string | null {
 export function setInviteTokenManual(token: string) {
   if (typeof window === 'undefined') return;
   const clean = token.trim();
+  const cookieFlags =
+    window.location.protocol === 'https:'
+      ? 'path=/; max-age=86400; SameSite=Lax; Secure'
+      : 'path=/; max-age=86400; SameSite=Lax';
   try {
     localStorage.setItem(INVITE_STORAGE_KEY, clean);
-    document.cookie = `monolith_invite=${encodeURIComponent(clean)}; path=/; SameSite=Lax`;
+    document.cookie = `monolith_invite=${encodeURIComponent(clean)}; ${cookieFlags}`;
   } catch {
     // ignore
   }
@@ -62,12 +76,15 @@ export function isTauriEnvironment(): boolean {
 export function isRemoteTunnelClient(): boolean {
   if (typeof window === 'undefined') return false;
   const h = window.location.hostname.toLowerCase();
-  return (
+  if (
     h.includes('.lhr.life') ||
     h.includes('.trycloudflare.com') ||
     h.includes('.serveo.net') ||
     h.includes('.serveousercontent.com')
-  );
+  ) {
+    return true;
+  }
+  return Boolean(extractInviteFromPathname(window.location.pathname));
 }
 
 /**
@@ -238,8 +255,11 @@ export class ApiClient {
     return appendInviteParam(`${this.baseUrl}/api/media/${encodeURIComponent(id)}/poster`);
   }
 
-  getMasterStreamUrl(id: string, audioIndex?: number): string {
-    const query = audioIndex !== undefined ? `?audio=${audioIndex}` : '';
+  getMasterStreamUrl(id: string, audioIndex?: number, startSeconds?: number): string {
+    const qs: string[] = [];
+    if (audioIndex !== undefined) qs.push(`audio=${audioIndex}`);
+    if (startSeconds !== undefined && startSeconds >= 10) qs.push(`start=${Math.floor(startSeconds)}`);
+    const query = qs.length > 0 ? `?${qs.join('&')}` : '';
     return appendInviteParam(
       `${this.baseUrl}/api/stream/${encodeURIComponent(id)}/master.m3u8${query}`
     );

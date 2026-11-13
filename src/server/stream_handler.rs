@@ -7,11 +7,13 @@ use std::path::PathBuf;
 
 use crate::app_state::AppState;
 use crate::error::AppError;
-use crate::transcoder::{extract_webvtt_subtitles, generate_master_playlist};
+use crate::transcoder::{extract_webvtt_subtitles, generate_master_playlist_with_params};
 
 #[derive(Debug, Deserialize)]
 pub struct AudioQuery {
     pub audio: Option<u32>,
+    pub start: Option<u64>,
+    pub invite: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +25,7 @@ pub struct SwitchAudioRequest {
 pub async fn get_master_playlist(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    req_headers: HeaderMap,
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
     let item = state
@@ -36,7 +39,22 @@ pub async fn get_master_playlist(
         (1920, 1080)
     };
 
-    let playlist_content = generate_master_playlist(&id, width, height, query.audio);
+    let invite = query.invite.clone().or_else(|| {
+        req_headers
+            .get("x-monolith-invite")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+
+    let playlist_content = generate_master_playlist_with_params(
+        &id,
+        width,
+        height,
+        query.audio,
+        query.start,
+        invite.as_deref(),
+    );
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -63,12 +81,13 @@ pub async fn get_variant_playlist(
         .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
 
     let audio_index = query.audio.unwrap_or(0);
+    let start_seconds = query.start.unwrap_or(0);
     let media_path = PathBuf::from(&item.file_path);
     let video_codec = item.metadata.as_ref().map(|m| m.video_codec.as_str());
 
     let _stream_info = state
         .transcode_sessions
-        .start_or_get_session(&id, &media_path, audio_index, video_codec)
+        .start_or_get_session_at(&id, &media_path, audio_index, video_codec, start_seconds)
         .await?;
 
     let temp_dir = state

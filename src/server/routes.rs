@@ -92,8 +92,33 @@ fn is_public_tunnel_host(req: &Request) -> bool {
         {
             return true;
         }
+        if let Ok(pub_url) = std::env::var("MONOLITH_PUBLIC_URL") {
+            let pub_host = pub_url
+                .trim()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            if !pub_host.is_empty() && (h == pub_host || h.starts_with(&format!("{pub_host}:"))) {
+                return true;
+            }
+        }
     }
     false
+}
+
+fn extract_invite_token_from_path(path: &str) -> Option<String> {
+    for prefix in ["/w/", "/tv/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            let tok = rest.split('/').next().unwrap_or("").trim();
+            if !tok.is_empty() {
+                return Some(tok.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn extract_invite_token_from_req(req: &Request) -> Option<String> {
@@ -107,7 +132,11 @@ fn extract_invite_token_from_req(req: &Request) -> Option<String> {
             }
         }
     }
-    // 2. Check custom header `x-monolith-invite`
+    // 2. Check clean invite path `/w/TOKEN` or `/tv/TOKEN`
+    if let Some(tok) = extract_invite_token_from_path(req.uri().path()) {
+        return Some(tok);
+    }
+    // 3. Check custom header `x-monolith-invite`
     if let Some(hdr) = req
         .headers()
         .get("x-monolith-invite")
@@ -117,7 +146,7 @@ fn extract_invite_token_from_req(req: &Request) -> Option<String> {
             return Some(hdr.trim().to_string());
         }
     }
-    // 3. Check Cookie `monolith_invite=TOKEN`
+    // 4. Check Cookie `monolith_invite=TOKEN`
     if let Some(cookies) = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()) {
         for part in cookies.split(';') {
             if let Some((k, v)) = part.trim().split_once('=') {
@@ -168,7 +197,7 @@ async fn invite_auth_middleware(
     if let Some(tok) = token_candidate {
         if state.tunnel.verify_token(Some(&tok)).await {
             if let Ok(cookie_val) = header::HeaderValue::from_str(&format!(
-                "monolith_invite={}; Path=/; SameSite=Lax",
+                "monolith_invite={}; Path=/; Max-Age=86400; SameSite=Lax; Secure",
                 tok
             )) {
                 resp.headers_mut().insert(header::SET_COOKIE, cookie_val);
@@ -269,4 +298,22 @@ pub async fn start_server(state: AppState, bind_addr: &str) -> Result<(), AppErr
         .map_err(|e| AppError::Other(format!("Axum server error: {}", e)))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_short_invite_path() {
+        assert_eq!(
+            extract_invite_token_from_path("/w/abc123def456"),
+            Some("abc123def456".to_string())
+        );
+        assert_eq!(
+            extract_invite_token_from_path("/tv/room99/"),
+            Some("room99".to_string())
+        );
+        assert_eq!(extract_invite_token_from_path("/api/media"), None);
+    }
 }
