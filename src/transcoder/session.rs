@@ -46,10 +46,36 @@ impl SessionManager {
         }
     }
 
-    /// Retrieves an active session's temp directory if available.
+    fn session_key(media_id: &str, audio_index: u32, start_seconds: u64) -> String {
+        format!("{}_{}_{}", media_id, audio_index, start_seconds)
+    }
+
+    /// Retrieves the most recently accessed active session's temp directory for `media_id`.
     pub async fn get_session_temp_dir(&self, media_id: &str) -> Option<PathBuf> {
         let mut map = self.sessions.write().await;
-        if let Some(session) = map.get_mut(media_id) {
+        let best_key = map
+            .iter()
+            .filter(|(_, s)| s.media_id == media_id)
+            .max_by_key(|(_, s)| s.last_accessed)
+            .map(|(k, _)| k.clone())?;
+        if let Some(session) = map.get_mut(&best_key) {
+            session.last_accessed = Instant::now();
+            Some(session.temp_dir.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Retrieves an exact session's temp directory for `(media_id, audio_index, start_seconds)`.
+    pub async fn get_session_temp_dir_at(
+        &self,
+        media_id: &str,
+        audio_index: u32,
+        start_seconds: u64,
+    ) -> Option<PathBuf> {
+        let key = Self::session_key(media_id, audio_index, start_seconds);
+        let mut map = self.sessions.write().await;
+        if let Some(session) = map.get_mut(&key) {
             session.last_accessed = Instant::now();
             Some(session.temp_dir.clone())
         } else {
@@ -78,39 +104,50 @@ impl SessionManager {
         video_codec: Option<&str>,
         start_seconds: u64,
     ) -> Result<HlsStreamInfo, AppError> {
+        let key = Self::session_key(media_id, audio_index, start_seconds);
         let mut map = self.sessions.write().await;
 
-        if let Some(session) = map.get_mut(media_id) {
+        if let Some(session) = map.get_mut(&key) {
             session.last_accessed = Instant::now();
             let playlist_check = session.temp_dir.join("index.m3u8");
-            if session.active_audio_index == audio_index
-                && session.start_seconds == start_seconds
-                && playlist_check.exists()
-            {
+            if playlist_check.exists() {
                 return Ok(HlsStreamInfo {
                     session_id: session.session_id.clone(),
                     master_playlist_url: format!("/api/stream/{}/master.m3u8", media_id),
                     variant_playlist_url: format!(
-                        "/api/stream/{}/index.m3u8?audio={}",
-                        media_id, audio_index
+                        "/api/stream/{}/s/{}/{}/index.m3u8",
+                        media_id, audio_index, start_seconds
                     ),
                     mode: session.mode.clone(),
                     audio_index,
                 });
-            } else {
-                info!(
-                    "Restarting or re-mapping stream for media {} (audio {}, start {}s)...",
-                    media_id, audio_index, start_seconds
-                );
-                // Stop current transcode child
-                if let Some(mut child) = session.child.take() {
-                    let _ = child.start_kill();
+            }
+            if let Some(mut child) = session.child.take() {
+                let _ = child.start_kill();
+            }
+        }
+
+        // Keep at most 3 concurrent offset sessions per media_id so old seek positions get reaped promptly
+        while map.values().filter(|s| s.media_id == media_id).count() >= 3 {
+            if let Some(oldest_key) = map
+                .iter()
+                .filter(|(k, s)| s.media_id == media_id && *k != &key)
+                .min_by_key(|(_, s)| s.last_accessed)
+                .map(|(k, _)| k.clone())
+            {
+                if let Some(mut old) = map.remove(&oldest_key) {
+                    if let Some(mut child) = old.child.take() {
+                        let _ = child.start_kill();
+                    }
+                    let _ = fs::remove_dir_all(&old.temp_dir);
                 }
+            } else {
+                break;
             }
         }
 
         // Create dedicated temporary directory for this session
-        let session_id = format!("monolith_{}_{}_{}", media_id, audio_index, start_seconds);
+        let session_id = format!("monolith_{}", key);
         let temp_dir = std::env::temp_dir().join(&session_id);
         if temp_dir.exists() {
             let _ = fs::remove_dir_all(&temp_dir);
@@ -218,15 +255,15 @@ impl SessionManager {
             last_accessed: Instant::now(),
         };
 
-        map.insert(media_id.to_string(), session);
+        map.insert(key, session);
         drop(map);
 
         Ok(HlsStreamInfo {
             session_id,
             master_playlist_url: format!("/api/stream/{}/master.m3u8", media_id),
             variant_playlist_url: format!(
-                "/api/stream/{}/index.m3u8?audio={}",
-                media_id, audio_index
+                "/api/stream/{}/s/{}/{}/index.m3u8",
+                media_id, audio_index, start_seconds
             ),
             mode: active_mode,
             audio_index,

@@ -205,21 +205,14 @@ pub fn generate_master_playlist_with_params(
         (raw_w, raw_h)
     };
 
-    let mut query_parts = Vec::new();
-    if let Some(idx) = audio_index {
-        query_parts.push(format!("audio={}", idx));
-    }
-    if let Some(start) = start_seconds.filter(|&s| s > 0) {
-        query_parts.push(format!("start={}", start));
-    }
-    if let Some(tok) = invite_token.map(str::trim).filter(|t| !t.is_empty()) {
-        query_parts.push(format!("invite={}", tok));
-    }
-
-    let variant_uri = if query_parts.is_empty() {
-        format!("/api/stream/{}/index.m3u8", media_id)
-    } else {
-        format!("/api/stream/{}/index.m3u8?{}", media_id, query_parts.join("&"))
+    let audio = audio_index.unwrap_or(0);
+    let start = start_seconds.unwrap_or(0);
+    let variant_uri = match invite_token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(tok) => format!(
+            "/api/stream/{}/s/{}/{}/index.m3u8?invite={}",
+            media_id, audio, start, tok
+        ),
+        None => format!("/api/stream/{}/s/{}/{}/index.m3u8", media_id, audio, start),
     };
 
     format!(
@@ -256,6 +249,6 @@ mod tests {
             Some("tok123"),
         );
         assert!(master.contains("RESOLUTION=1920x802"));
-        assert!(master.contains("/api/stream/abc/index.m3u8?audio=0&start=879&invite=tok123"));
+        assert!(master.contains("/api/stream/abc/s/0/879/index.m3u8?invite=tok123"));
     }
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
 import { MediaItem, PartyState, ServerStatus, TunnelStatus } from './types/media';
-import { api, isGuestClient, setInviteTokenManual } from './api/client';
+import { api, getPeerId, isGuestClient, setInviteTokenManual } from './api/client';
 import { NoiseOverlay } from './components/NoiseOverlay';
 import { Header } from './components/Header';
 import { MediaBrowser } from './components/MediaBrowser';
@@ -27,6 +27,7 @@ export const App: React.FC = () => {
   const [needsInviteAuth, setNeedsInviteAuth] = useState(false);
   const [inviteInput, setInviteInput] = useState('');
   const syncEpochRef = useRef(0);
+  const lastAppPartySeqRef = useRef(0);
   const isGuest = isGuestClient();
 
   const handleProgressUpdate = useCallback(
@@ -156,6 +157,23 @@ export const App: React.FC = () => {
     setView('browser');
     setSelectedItem(null);
   };
+
+  // Sync active episode/movie switches across Watch Party peers while in player view
+  useEffect(() => {
+    if (!partyState?.enabled || !partyState.media_id) return;
+    if (partyState.event_seq <= lastAppPartySeqRef.current) return;
+    lastAppPartySeqRef.current = partyState.event_seq;
+    if (
+      view === 'player' &&
+      partyState.updated_by !== getPeerId() &&
+      selectedItem?.id !== partyState.media_id
+    ) {
+      const match = mediaItems.find((m) => m.id === partyState.media_id);
+      if (match) {
+        setSelectedItem(match);
+      }
+    }
+  }, [partyState, view, selectedItem?.id, mediaItems]);
 
   // Episodes = videos in the same folder as the one playing, in natural order (E2 before E10).
   const playlist = useMemo(() => {

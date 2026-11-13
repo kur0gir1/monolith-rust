@@ -36,6 +36,8 @@ pub struct PartyUpdateRequest {
     pub current_time: Option<f64>,
     pub audio_track: Option<usize>,
     pub subtitle_track: Option<Option<usize>>,
+    #[serde(default)]
+    pub is_heartbeat: bool,
 }
 
 struct PartyInner {
@@ -164,8 +166,10 @@ impl PartyManager {
         }
 
         guard.state.updated_at_ms = now;
-        guard.state.event_seq += 1;
-        guard.state.updated_by = req.peer_id;
+        if !req.is_heartbeat {
+            guard.state.event_seq += 1;
+            guard.state.updated_by = req.peer_id;
+        }
         guard.state.active_peers = guard.peers.len().max(1);
 
         guard.state.clone()
@@ -223,8 +227,25 @@ mod tests {
             current_time: Some(42.5),
             audio_track: None,
             subtitle_track: None,
+            is_heartbeat: false,
         })
         .await;
+
+        let seq_after_cmd = mgr.get_state(Some("guest")).await.event_seq;
+        let hb = mgr
+            .update(PartyUpdateRequest {
+                peer_id: "host".to_string(),
+                enabled: None,
+                media_id: None,
+                media_title: None,
+                is_playing: Some(true),
+                current_time: Some(44.5),
+                audio_track: None,
+                subtitle_track: None,
+                is_heartbeat: true,
+            })
+            .await;
+        assert_eq!(hb.event_seq, seq_after_cmd);
 
         let before = mgr.get_state(Some("guest")).await;
         assert_eq!(before.media_id, Some("movie-123".to_string()));

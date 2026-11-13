@@ -69,41 +69,37 @@ pub async fn get_master_playlist(
     Ok((StatusCode::OK, headers, playlist_content).into_response())
 }
 
-/// GET /api/stream/:id/index.m3u8
-pub async fn get_variant_playlist(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    Query(query): Query<AudioQuery>,
+async fn serve_variant_playlist(
+    state: &AppState,
+    id: &str,
+    audio_index: u32,
+    start_seconds: u64,
 ) -> Result<Response, AppError> {
     let item = state
-        .get_item(&id)
+        .get_item(id)
         .await
-        .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
+        .ok_or_else(|| AppError::MediaNotFound(id.to_string()))?;
 
-    let audio_index = query.audio.unwrap_or(0);
-    let start_seconds = query.start.unwrap_or(0);
     let media_path = PathBuf::from(&item.file_path);
     let video_codec = item.metadata.as_ref().map(|m| m.video_codec.as_str());
 
-    let _stream_info = state
+    state
         .transcode_sessions
-        .start_or_get_session_at(&id, &media_path, audio_index, video_codec, start_seconds)
+        .start_or_get_session_at(id, &media_path, audio_index, video_codec, start_seconds)
         .await?;
 
     let temp_dir = state
         .transcode_sessions
-        .get_session_temp_dir(&id)
+        .get_session_temp_dir_at(id, audio_index, start_seconds)
         .await
         .ok_or_else(|| AppError::TranscodeError("Failed to find session temp directory".to_string()))?;
 
     let playlist_file = temp_dir.join("index.m3u8");
-
     if !playlist_file.exists() {
         return Err(AppError::TranscodeError("HLS playlist not ready yet".to_string()));
     }
 
     let content = tokio::fs::read_to_string(&playlist_file).await?;
-
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -117,30 +113,13 @@ pub async fn get_variant_playlist(
     Ok((StatusCode::OK, headers, content).into_response())
 }
 
-/// GET /api/stream/:id/:segment
-pub async fn get_segment(
-    State(state): State<AppState>,
-    AxumPath((id, segment)): AxumPath<(String, String)>,
-) -> Result<Response, AppError> {
-    // Prevent directory traversal attacks
-    if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
-        return Err(AppError::InvalidPath("Invalid segment filename".to_string()));
-    }
-
-    let temp_dir = state
-        .transcode_sessions
-        .get_session_temp_dir(&id)
-        .await
-        .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
-
-    let segment_path = temp_dir.join(&segment);
-
+async fn serve_segment_from_dir(temp_dir: PathBuf, segment: &str) -> Result<Response, AppError> {
+    let segment_path = temp_dir.join(segment);
     if !segment_path.exists() {
         return Err(AppError::NotFound(format!("Segment {} not found", segment)));
     }
 
     let bytes = tokio::fs::read(&segment_path).await?;
-
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -152,6 +131,59 @@ pub async fn get_segment(
     );
 
     Ok((StatusCode::OK, headers, bytes).into_response())
+}
+
+/// GET /api/stream/:id/index.m3u8
+pub async fn get_variant_playlist(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<AudioQuery>,
+) -> Result<Response, AppError> {
+    serve_variant_playlist(&state, &id, query.audio.unwrap_or(0), query.start.unwrap_or(0)).await
+}
+
+/// GET /api/stream/:id/s/:audio/:start/index.m3u8
+pub async fn get_scoped_variant_playlist(
+    State(state): State<AppState>,
+    AxumPath((id, audio, start)): AxumPath<(String, u32, u64)>,
+) -> Result<Response, AppError> {
+    serve_variant_playlist(&state, &id, audio, start).await
+}
+
+/// GET /api/stream/:id/s/:audio/:start/:segment
+pub async fn get_scoped_segment(
+    State(state): State<AppState>,
+    AxumPath((id, audio, start, segment)): AxumPath<(String, u32, u64, String)>,
+) -> Result<Response, AppError> {
+    if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
+        return Err(AppError::InvalidPath("Invalid segment filename".to_string()));
+    }
+
+    let temp_dir = state
+        .transcode_sessions
+        .get_session_temp_dir_at(&id, audio, start)
+        .await
+        .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
+
+    serve_segment_from_dir(temp_dir, &segment).await
+}
+
+/// GET /api/stream/:id/:segment
+pub async fn get_segment(
+    State(state): State<AppState>,
+    AxumPath((id, segment)): AxumPath<(String, String)>,
+) -> Result<Response, AppError> {
+    if segment.contains("..") || segment.contains('/') || segment.contains('\\') {
+        return Err(AppError::InvalidPath("Invalid segment filename".to_string()));
+    }
+
+    let temp_dir = state
+        .transcode_sessions
+        .get_session_temp_dir(&id)
+        .await
+        .ok_or_else(|| AppError::MediaNotFound(id.clone()))?;
+
+    serve_segment_from_dir(temp_dir, &segment).await
 }
 
 /// GET /api/stream/:id/subtitles/:sub_index/subs.vtt

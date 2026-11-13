@@ -258,7 +258,7 @@ export class ApiClient {
   getMasterStreamUrl(id: string, audioIndex?: number, startSeconds?: number): string {
     const qs: string[] = [];
     if (audioIndex !== undefined) qs.push(`audio=${audioIndex}`);
-    if (startSeconds !== undefined && startSeconds >= 10) qs.push(`start=${Math.floor(startSeconds)}`);
+    if (startSeconds !== undefined && startSeconds >= 3) qs.push(`start=${Math.floor(startSeconds)}`);
     const query = qs.length > 0 ? `?${qs.join('&')}` : '';
     return appendInviteParam(
       `${this.baseUrl}/api/stream/${encodeURIComponent(id)}/master.m3u8${query}`
@@ -409,6 +409,7 @@ export class ApiClient {
     current_time?: number;
     audio_track?: number;
     subtitle_track?: number | null;
+    is_heartbeat?: boolean;
   }): Promise<PartyState> {
     const res = await fetch(appendInviteParam(`${this.baseUrl}/api/party`), {
       method: 'POST',
