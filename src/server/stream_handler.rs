@@ -102,7 +102,9 @@ pub async fn get_master_playlist(
     };
 
     let invite = extract_invite(&req_headers, &query);
-    let max_width = query.q.map(|q| normalize_max_width(Some(if q <= 720 { 1280 } else { q })));
+    let max_width = query
+        .q
+        .map(|q| normalize_max_width(Some(if q <= 720 { 1280 } else { 2560 })));
 
     let playlist_content = generate_master_playlist_with_options(
         &id,
@@ -210,7 +212,7 @@ pub async fn get_variant_playlist(
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
     let invite = extract_invite(&req_headers, &query);
-    let max_width = normalize_max_width(query.q.map(|q| if q <= 720 { 1280 } else { q }));
+    let max_width = normalize_max_width(query.q.map(|q| if q <= 720 { 1280 } else { 2560 }));
     serve_variant_playlist(
         &state,
         &id,
@@ -230,7 +232,7 @@ pub async fn get_scoped_variant_playlist(
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
     let invite = extract_invite(&req_headers, &query);
-    serve_variant_playlist(&state, &id, audio, start, 1920, invite.as_deref()).await
+    serve_variant_playlist(&state, &id, audio, start, 2560, invite.as_deref()).await
 }
 
 /// GET /api/stream/:id/v/:max_w/:audio/:start/index.m3u8

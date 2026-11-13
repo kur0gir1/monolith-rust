@@ -137,8 +137,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isSyncingParty, setIsSyncingParty] = useState<boolean>(false);
   const lastAppliedSeqRef = useRef<number>(partyState?.event_seq ?? 0);
   const isWatchPartyActive = Boolean(serverStatus?.tunnel?.active || partyState?.enabled);
-  const lowBandwidthStreamRef = useRef<boolean>(isWatchPartyActive || !isHost);
-  lowBandwidthStreamRef.current = isWatchPartyActive || !isHost;
   const displayPeers = Math.max(activePeers, partyState?.active_peers ?? 1);
   const serverPartyEnabledRef = useRef<boolean>(isWatchPartyActive);
 
@@ -283,12 +281,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setStreamStatus('CONNECTING');
       setPlayerError(null);
 
-      const streamUrl = api.getMasterStreamUrl(
-        item.id,
-        audioIdx,
-        startOffset,
-        lowBandwidthStreamRef.current
-      );
+      const streamUrl = api.getMasterStreamUrl(item.id, audioIdx, startOffset);
 
       if (Hls.isSupported()) {
         let fatalNetworkRetries = 0;

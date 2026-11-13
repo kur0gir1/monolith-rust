@@ -33,11 +33,11 @@ fn extend_hls_fmp4_args(args: &mut Vec<String>, output_str: String) {
     ]);
 }
 
-/// Normalizes an optional target width cap into 720p-class (1280) or 1080p-class (1920).
+/// Normalizes an optional target width cap into 720p-class (1280) or QHD/FHD-class (2560).
 pub fn normalize_max_width(max_width: Option<u32>) -> u32 {
     match max_width {
         Some(w) if w <= 1280 => 1280,
-        _ => 1920,
+        _ => 2560,
     }
 }
 
@@ -55,11 +55,11 @@ pub fn build_ffmpeg_transcode_args_from(
         output_playlist,
         audio_index,
         start_seconds,
-        1920,
+        2560,
     )
 }
 
-/// Builds FFmpeg command line arguments with an explicit `max_width` cap (1280 for Watch Party/mobile, 1920 default).
+/// Builds FFmpeg command line arguments with an explicit `max_width` cap (1280 low-bandwidth, 2560 QHD/FHD default).
 pub fn build_ffmpeg_transcode_args_with_options(
     mode: &TranscodeMode,
     input_path: &Path,
@@ -76,7 +76,7 @@ pub fn build_ffmpeg_transcode_args_with_options(
     let (level, v_bitrate, v_maxrate, v_bufsize, a_bitrate) = if capped_w <= 1280 {
         ("4.0", "2000k", "2500k", "5000k", "128k")
     } else {
-        ("4.1", "3500k", "4M", "8M", "160k")
+        ("5.0", "7500k", "9M", "18M", "192k")
     };
     // GPU-resident max scale & 8-bit nv12 conversion keeps 4K 10-bit HEVC transcodes ~7-10x realtime.
     let cuda_mobile_safe_vf = format!("scale_cuda=w='min({},iw)':h=-2:format=nv12", capped_w);
@@ -268,7 +268,7 @@ pub fn generate_master_playlist_with_options(
     let (bandwidth, codecs) = if cap_w <= 1280 {
         (2_500_000, "avc1.640028,mp4a.40.2")
     } else {
-        (4_000_000, "avc1.640029,mp4a.40.2")
+        (9_000_000, "avc1.640032,mp4a.40.2")
     };
 
     format!(
@@ -295,7 +295,8 @@ mod tests {
         assert!(ss_pos < input_pos);
         assert_eq!(args[ss_pos + 1], "879");
         assert!(args.iter().any(|a| a == "cuda"));
-        assert!(args.iter().any(|a| a.contains("scale_cuda") && a.contains("min(1920,iw)")));
+        assert!(args.iter().any(|a| a.contains("scale_cuda") && a.contains("min(2560,iw)")));
+        assert!(args.windows(2).any(|w| w[0] == "-b:v" && w[1] == "7500k"));
         assert!(args.windows(2).any(|w| w[0] == "-hls_segment_type" && w[1] == "fmp4"));
         assert!(args.windows(2).any(|w| w[0] == "-hls_fmp4_init_filename" && w[1] == "init.mp4"));
 
@@ -321,8 +322,8 @@ mod tests {
             Some("tok123"),
         );
         assert!(master.contains("#EXT-X-VERSION:7"));
-        assert!(master.contains("RESOLUTION=1920x802"));
-        assert!(master.contains("CODECS=\"avc1.640029,mp4a.40.2\""));
+        assert!(master.contains("RESOLUTION=2560x1068"));
+        assert!(master.contains("CODECS=\"avc1.640032,mp4a.40.2\""));
         assert!(master.contains("/api/stream/abc/s/0/879/index.m3u8?invite=tok123"));
 
         let master_720 = generate_master_playlist_with_options(

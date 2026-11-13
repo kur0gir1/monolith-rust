@@ -166,7 +166,7 @@ impl SessionManager {
         audio_index: u32,
         start_seconds: u64,
     ) -> Option<PathBuf> {
-        self.get_session_temp_dir_with_width(media_id, audio_index, start_seconds, 1920)
+        self.get_session_temp_dir_with_width(media_id, audio_index, start_seconds, 2560)
             .await
     }
 
@@ -215,7 +215,7 @@ impl SessionManager {
             audio_index,
             video_codec,
             start_seconds,
-            1920,
+            2560,
         )
         .await
     }

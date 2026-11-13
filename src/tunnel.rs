@@ -293,81 +293,23 @@ impl TunnelManager {
                 }
 
                 if let Some(out) = stdout {
-                    let inner_clone = self.inner.clone();
-                    let tx_clone = self.status_tx.clone();
-                    tokio::spawn(async move {
-                        let mut reader = BufReader::new(out).lines();
-                        while let Ok(Some(line)) = reader.next_line().await {
-                            if let Some(url) = extract_https_url(&line) {
-                                let mut g = inner_clone.write().await;
-                                if g.attempt_id != my_attempt_id {
-                                    break;
-                                }
-                                info!("Encrypted public tunnel established: {}", url);
-                                g.public_url = Some(url);
-                                g.status = "ONLINE".to_string();
-                                g.error = None;
-                                drop(g);
-                                tx_clone.send_modify(|v| *v = v.wrapping_add(1));
-                            }
-                        }
-                    });
+                    spawn_tunnel_output_reader(
+                        out,
+                        self.inner.clone(),
+                        self.status_tx.clone(),
+                        my_attempt_id,
+                        false,
+                    );
                 }
 
                 if let Some(err) = stderr {
-                    let inner_clone = self.inner.clone();
-                    let tx_clone = self.status_tx.clone();
-                    tokio::spawn(async move {
-                        let mut reader = BufReader::new(err).lines();
-                        while let Ok(Some(line)) = reader.next_line().await {
-                            if let Some(url) = extract_https_url(&line) {
-                                let mut g = inner_clone.write().await;
-                                if g.attempt_id != my_attempt_id {
-                                    break;
-                                }
-                                info!("Encrypted public tunnel established (stderr): {}", url);
-                                g.public_url = Some(url);
-                                g.status = "ONLINE".to_string();
-                                g.error = None;
-                                drop(g);
-                                tx_clone.send_modify(|v| *v = v.wrapping_add(1));
-                            } else if line.to_lowercase().contains("permission denied")
-                                || line.to_lowercase().contains("connection refused")
-                            {
-                                warn!("Tunnel stderr warning: {}", line);
-                                let mut g = inner_clone.write().await;
-                                if g.attempt_id != my_attempt_id {
-                                    break;
-                                }
-                                if g.public_url.is_none() {
-                                    g.status = "ERROR".to_string();
-                                    g.active = false;
-                                    g.error = Some(line);
-                                    drop(g);
-                                    tx_clone.send_modify(|v| *v = v.wrapping_add(1));
-                                }
-                            }
-                        }
-                        let mut g = inner_clone.write().await;
-                        if g.attempt_id == my_attempt_id
-                            && (g.status == "CONNECTING" || g.status == "ONLINE")
-                        {
-                            let was_online = g.status == "ONLINE";
-                            g.status = "ERROR".to_string();
-                            g.active = false;
-                            g.public_url = None;
-                            if g.error.is_none() {
-                                g.error = Some(if was_online {
-                                    "Tunnel process exited unexpectedly.".to_string()
-                                } else {
-                                    "Tunnel process exited before establishing a public URL."
-                                        .to_string()
-                                });
-                            }
-                            drop(g);
-                            tx_clone.send_modify(|v| *v = v.wrapping_add(1));
-                        }
-                    });
+                    spawn_tunnel_output_reader(
+                        err,
+                        self.inner.clone(),
+                        self.status_tx.clone(),
+                        my_attempt_id,
+                        true,
+                    );
                 }
             }
             Err(e) => {
@@ -389,8 +331,8 @@ impl TunnelManager {
             }
         }
 
-        // Wait up to 4.5s for the tunnel URL to appear so the caller gets it immediately if fast
-        for _ in 0..18 {
+        // Wait up to 14s so tunnel URL allocation + initial DNS propagation finish before returning
+        for _ in 0..56 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             let st = self.get_status().await;
             if st.public_url.is_some() || st.status == "ERROR" || !st.active {
@@ -400,6 +342,135 @@ impl TunnelManager {
 
         self.get_status().await
     }
+}
+
+fn extract_url_host(url: &str) -> Option<&str> {
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host_port = after_scheme.split('/').next()?;
+    let host = host_port.split(':').next()?.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+async fn wait_for_dns_if_quick_tunnel(
+    inner: &Arc<RwLock<TunnelInner>>,
+    attempt_id: u64,
+    url: &str,
+) -> bool {
+    let Some(host) = extract_url_host(url) else {
+        return true;
+    };
+    if !host.ends_with(".trycloudflare.com") {
+        return true;
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+    let mut resolved = false;
+    while tokio::time::Instant::now() < deadline {
+        if inner.read().await.attempt_id != attempt_id {
+            return false;
+        }
+        if let Ok(mut addrs) = tokio::net::lookup_host((host, 443)).await {
+            if addrs.next().is_some() {
+                resolved = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    if resolved {
+        // Brief grace window after local resolver sees the record so mobile/ISP DNS catches up too
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    } else {
+        warn!("Quick tunnel DNS propagation check timed out for {}; publishing anyway", host);
+    }
+
+    inner.read().await.attempt_id == attempt_id
+}
+
+fn spawn_tunnel_output_reader<R>(
+    stream: R,
+    inner: Arc<RwLock<TunnelInner>>,
+    tx: Arc<watch::Sender<u64>>,
+    attempt_id: u64,
+    is_stderr: bool,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stream).lines();
+        let mut published_url = false;
+        while let Ok(Some(line)) = reader.next_line().await {
+            if !published_url {
+                if let Some(url) = extract_https_url(&line) {
+                    published_url = true;
+                    let inner_pub = inner.clone();
+                    let tx_pub = tx.clone();
+                    tokio::spawn(async move {
+                        if !wait_for_dns_if_quick_tunnel(&inner_pub, attempt_id, &url).await {
+                            return;
+                        }
+                        let mut g = inner_pub.write().await;
+                        if g.attempt_id != attempt_id || g.public_url.is_some() {
+                            return;
+                        }
+                        info!("Encrypted public tunnel established: {}", url);
+                        g.public_url = Some(url);
+                        g.status = "ONLINE".to_string();
+                        g.error = None;
+                        drop(g);
+                        tx_pub.send_modify(|v| *v = v.wrapping_add(1));
+                    });
+                    continue;
+                }
+            }
+
+            if is_stderr
+                && (line.to_lowercase().contains("permission denied")
+                    || line.to_lowercase().contains("connection refused"))
+            {
+                warn!("Tunnel stderr warning: {}", line);
+                let mut g = inner.write().await;
+                if g.attempt_id != attempt_id {
+                    break;
+                }
+                if g.public_url.is_none() {
+                    g.status = "ERROR".to_string();
+                    g.active = false;
+                    g.error = Some(line);
+                    drop(g);
+                    tx.send_modify(|v| *v = v.wrapping_add(1));
+                }
+            }
+        }
+
+        if is_stderr {
+            let mut g = inner.write().await;
+            if g.attempt_id == attempt_id
+                && (g.status == "CONNECTING" || g.status == "ONLINE")
+            {
+                let was_online = g.status == "ONLINE";
+                g.status = "ERROR".to_string();
+                g.active = false;
+                g.public_url = None;
+                if g.error.is_none() {
+                    g.error = Some(if was_online {
+                        "Tunnel process exited unexpectedly.".to_string()
+                    } else {
+                        "Tunnel process exited before establishing a public URL.".to_string()
+                    });
+                }
+                drop(g);
+                tx.send_modify(|v| *v = v.wrapping_add(1));
+            }
+        }
+    });
 }
 
 fn extract_https_url(line: &str) -> Option<String> {
@@ -479,6 +550,10 @@ mod tests {
         assert_eq!(
             extract_https_url(line3),
             Some("https://temporary-subdomain.trycloudflare.com".to_string())
+        );
+        assert_eq!(
+            extract_url_host("https://temporary-subdomain.trycloudflare.com/w/123"),
+            Some("temporary-subdomain.trycloudflare.com")
         );
     }
 }
