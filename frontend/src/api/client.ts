@@ -70,6 +70,26 @@ export function isRemoteTunnelClient(): boolean {
   );
 }
 
+/**
+ * True when running on the host machine itself (Tauri desktop app or loopback URL without an invite query).
+ */
+export function isHostClient(): boolean {
+  if (typeof window === 'undefined') return true;
+  if (isTauriEnvironment()) return true;
+  if (isRemoteTunnelClient()) return false;
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('invite')) return false;
+  const h = window.location.hostname.toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+}
+
+/**
+ * True for viewers connected via LAN IP (phone/TV/other PC) or Watch Party tunnel link.
+ */
+export function isGuestClient(): boolean {
+  return !isHostClient();
+}
+
 // Compute the base URL for Axum REST and streaming endpoints
 export function getApiBaseUrl(): string {
   if (typeof window === 'undefined') {

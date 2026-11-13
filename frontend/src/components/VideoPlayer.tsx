@@ -78,7 +78,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const nextItem = currentIndex >= 0 ? playlist[currentIndex + 1] ?? null : null;
   const showPlaylist = playlist.length > 1;
   const [chapters, setChapters] = useState<ChapterMarker[]>([]);
-  const [playlistOpen, setPlaylistOpen] = useState<boolean>(true);
+  const [playlistOpen, setPlaylistOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth > 900 && window.innerHeight > 540 : true
+  );
   const [autoNext, setAutoNext] = useState<boolean>(
     () => localStorage.getItem(AUTO_NEXT_STORAGE_KEY) !== 'false'
   );

@@ -5,12 +5,14 @@ import { api } from '../api/client';
 interface MediaCardProps {
   item: MediaItem;
   watchedPercent?: number;
+  isGuest?: boolean;
   onSelect: (item: MediaItem) => void;
 }
 
 export const MediaCard: React.FC<MediaCardProps> = ({
   item,
   watchedPercent = 0,
+  isGuest = false,
   onSelect,
 }) => {
   const [imageFailed, setImageFailed] = useState(false);
@@ -102,10 +104,10 @@ export const MediaCard: React.FC<MediaCardProps> = ({
               <polygon points="20,18 32,24 20,30" fill="currentColor" />
               <circle cx="24" cy="24" r="14" fill="none" stroke="currentColor" strokeWidth="0.7" strokeDasharray="2 2" />
             </svg>
-            <span style={{ fontSize: '0.78rem', fontWeight: 700, marginTop: '6px' }}>
+            <span style={{ fontSize: '0.95rem', fontWeight: 700, marginTop: '6px' }}>
               [{item.extension.toUpperCase()}]
             </span>
-            <span style={{ fontSize: '0.68rem', marginTop: '3px', opacity: 0.72 }}>
+            <span style={{ fontSize: '0.875rem', marginTop: '4px', opacity: 0.78 }}>
               {getFileSizeString()}
             </span>
           </div>
@@ -129,8 +131,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({
         <div className="media-card-badges">
           <span className="badge badge-inverted">{getResolutionBadge()}</span>
           <span className="badge">{getDurationString()}</span>
-          <span className="badge">{codec}</span>
-          <span className="badge">{audioCount}A/{subCount}S</span>
+          {!isGuest && (
+            <>
+              <span className="badge">{codec}</span>
+              <span className="badge">{audioCount}A/{subCount}S</span>
+            </>
+          )}
         </div>
       </div>
     </div>

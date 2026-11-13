@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PartyState, ServerStatus, TunnelStatus } from '../types/media';
-import { api, isRemoteTunnelClient, isTauriEnvironment } from '../api/client';
+import { api, isGuestClient, isRemoteTunnelClient, isTauriEnvironment } from '../api/client';
 import { generateQrMatrix } from '../utils/qrcode';
 
 interface HeaderProps {
   serverStatus: ServerStatus | null;
   selectedDirectory: string | null;
   onSelectDirectory: (path?: string) => Promise<void>;
+  onRefreshLibrary?: () => void;
   isScanning: boolean;
   partyState?: PartyState | null;
   onPartyStateChange?: (state: PartyState | null) => void;
@@ -18,6 +19,7 @@ export const Header: React.FC<HeaderProps> = ({
   serverStatus,
   selectedDirectory,
   onSelectDirectory,
+  onRefreshLibrary,
   isScanning,
   partyState,
   onPartyStateChange,
@@ -36,7 +38,8 @@ export const Header: React.FC<HeaderProps> = ({
   const autoCopiedUrlRef = useRef<string | null>(null);
 
   const isTauri = isTauriEnvironment();
-  const isRemoteGuest = isRemoteTunnelClient();
+  const isRemoteTunnel = isRemoteTunnelClient();
+  const isGuest = isGuestClient();
 
   useEffect(() => {
     if (serverStatus?.tunnel) {
@@ -83,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
 
   // Toggle Watch Party ON (auto-starts tunnel & generates link + QR) or OFF (reverts to local network)
   const handleToggleWatchParty = async () => {
-    if (isRemoteGuest || isTunnelBusy) return;
+    if (isGuest || isTunnelBusy) return;
     setIsTunnelBusy(true);
 
     if (isWatchPartyOn) {
@@ -140,7 +143,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const handleSelectClick = async () => {
-    if (isRemoteGuest) return;
+    if (isGuest) return;
     if (isTauri) {
       await onSelectDirectory();
     } else {
@@ -219,42 +222,27 @@ export const Header: React.FC<HeaderProps> = ({
   }, [activeShareUrl]);
 
   const compactRootLabel = useMemo(() => {
-    if (isRemoteGuest) return 'REMOTE PARTY GUEST';
+    if (isGuest) {
+      return isRemoteTunnel || isWatchPartyOn ? 'WATCH PARTY' : 'HOME STREAM';
+    }
     if (!selectedDirectory) return 'NO DIR';
     const norm = selectedDirectory.replace(/\\/g, '/').replace(/\/+$/, '');
     const parts = norm.split('/');
     return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : norm;
-  }, [isRemoteGuest, selectedDirectory]);
+  }, [isGuest, isRemoteTunnel, isWatchPartyOn, selectedDirectory]);
 
   return (
     <>
       <header className="app-header">
         <div className="header-branding">
-          {/* Cyber-Sigilism Thorny Blade Crest */}
-          <svg
-            className="sigil-emblem"
-            viewBox="0 0 40 40"
-            width="28"
-            height="28"
-            aria-hidden="true"
-          >
-            {/* Outer barbed spine & asymmetric needle horns */}
-            <path
-              d="M20 1 L21.8 14.5 L39 20 L21.8 25.5 L20 39 L18.2 25.5 L1 20 L18.2 14.5 Z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.2"
-            />
-            <path
-              d="M7 7 C13 13, 15 15, 20 12 C25 15, 27 13, 33 7 C27 15, 25 17, 28 20 C25 23, 27 25, 33 33 C27 27, 25 25, 20 28 C15 25, 13 27, 7 33 C13 25, 15 23, 12 20 C15 17, 13 15, 7 7 Z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="0.95"
-            />
-            {/* Core diamond reticle */}
-            <polygon points="20,14 23,20 20,26 17,20" fill="currentColor" />
-            <circle cx="20" cy="20" r="9.5" fill="none" stroke="currentColor" strokeWidth="0.7" strokeDasharray="2 2" />
-          </svg>
+          <img
+            src="/logo.png"
+            alt="Monolith Logo"
+            className="header-logo"
+            onError={(e) => {
+              (e.target as HTMLElement).style.display = 'none';
+            }}
+          />
 
           <div className="header-title-group">
             <div className="header-title-row">
@@ -265,7 +253,7 @@ export const Header: React.FC<HeaderProps> = ({
               </svg>
               <span
                 className="badge header-root-badge"
-                title={selectedDirectory || 'No directory loaded'}
+                title={isGuest ? compactRootLabel : selectedDirectory || 'No directory loaded'}
               >
                 {compactRootLabel}
               </span>
@@ -274,100 +262,122 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="header-actions">
-          {/* Network Mode & Direct Link Copy / Open */}
-          {isWatchPartyOn && tunnelStatus?.invite_url ? (
-            <button
-              type="button"
-              className="status-link-btn"
-              onClick={() => handleCopyLink(tunnelStatus.invite_url!)}
-              title="Click to copy Watch Party invite link"
-            >
-              {copiedLink ? '[✦ LINK COPIED]' : '[⧉ COPY PARTY LINK]'}
-            </button>
-          ) : isWatchPartyOn && tunnelStatus?.status === 'CONNECTING' ? (
-            <span className="badge badge-inverted">
-              <span className="loading-spinner">✦</span> [GENERATING LINK...]
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="status-link-btn"
-              onClick={() => api.openUrlInBrowser(lanUrl)}
-              title="Local Network Stream URL (click to open in browser)"
-            >
-              LAN // {lanUrl.replace(/^https?:\/\//, '')} ↗
-            </button>
-          )}
-
-          {/* Active Peers Counter when Watch Party is On */}
-          {(isWatchPartyOn || activePeers > 1) && (
-            <span className="badge badge-inverted" title="Connected Watch Party peers">
-              [PEERS: {activePeers}]
-            </span>
-          )}
-
-          {/* QR Code Popover Button (works for both Watch Party Link & Local LAN) */}
-          {!isRemoteGuest && (
-            <button
-              type="button"
-              className={`brutalist-btn sm ${showQrPopover ? 'active' : ''}`}
-              onClick={() => {
-                setQrTargetMode(isWatchPartyOn ? 'party' : 'lan');
-                setShowQrPopover((v) => !v);
-              }}
-              title="Show scannable QR code for phone"
-            >
-              [⌖ QR]
-            </button>
-          )}
-
-          {/* Direct Watch Party ON / OFF Toggle */}
-          {!isRemoteGuest && (
-            <button
-              type="button"
-              role="switch"
-              aria-checked={isWatchPartyOn}
-              className={`brutalist-btn sm watch-party-toggle ${isWatchPartyOn ? 'active' : ''}`}
-              onClick={handleToggleWatchParty}
-              disabled={isTunnelBusy}
-              title={
-                isWatchPartyOn
-                  ? 'Toggle OFF to kill Watch Party link and return to local network only'
-                  : 'Toggle ON to enable Watch Party and auto-generate shareable link + QR code'
-              }
-            >
-              <span className="toggle-indicator" aria-hidden="true">
-                {isTunnelBusy ? '✦' : isWatchPartyOn ? '◉' : '○'}
-              </span>
-              <span>
-                WATCH PARTY: {isTunnelBusy ? 'SYNC...' : isWatchPartyOn ? 'ON' : 'OFF'}
-              </span>
-            </button>
-          )}
-
-          {/* Root Directory Scan Trigger */}
-          {!isRemoteGuest && (
-            <button
-              type="button"
-              className="brutalist-btn sm"
-              onClick={handleSelectClick}
-              disabled={isScanning}
-              title="Select or scan media library directory"
-            >
-              {isScanning ? (
+          {isGuest ? (
+            <>
+              {isWatchPartyOn ? (
                 <>
-                  <span className="loading-spinner">■</span> [SCANNING...]
+                  <span className="badge badge-inverted">◉ WATCH PARTY LIVE</span>
+                  <span className="badge">VIEWERS: {activePeers}</span>
                 </>
               ) : (
-                '[◈ SCAN DIR]'
+                <>
+                  <span className="badge">◈ LAN CONNECTED</span>
+                  {activePeers > 1 && <span className="badge">VIEWERS: {activePeers}</span>}
+                </>
               )}
-            </button>
+              {onRefreshLibrary && (
+                <button
+                  type="button"
+                  className="brutalist-btn sm"
+                  onClick={onRefreshLibrary}
+                  title="Refresh shared media library"
+                >
+                  ↻ REFRESH
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              {/* Network Mode & Direct Link Copy / Open */}
+              {isWatchPartyOn && tunnelStatus?.invite_url ? (
+                <button
+                  type="button"
+                  className="status-link-btn"
+                  onClick={() => handleCopyLink(tunnelStatus.invite_url!)}
+                  title="Click to copy Watch Party invite link"
+                >
+                  {copiedLink ? '[✦ LINK COPIED]' : '[⧉ COPY PARTY LINK]'}
+                </button>
+              ) : isWatchPartyOn && tunnelStatus?.status === 'CONNECTING' ? (
+                <span className="badge badge-inverted">
+                  <span className="loading-spinner">✦</span> [GENERATING LINK...]
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="status-link-btn"
+                  onClick={() => api.openUrlInBrowser(lanUrl)}
+                  title="Local Network Stream URL (click to open in browser)"
+                >
+                  LAN // {lanUrl.replace(/^https?:\/\//, '')} ↗
+                </button>
+              )}
+
+              {/* Active Peers Counter when Watch Party is On */}
+              {(isWatchPartyOn || activePeers > 1) && (
+                <span className="badge badge-inverted" title="Connected Watch Party peers">
+                  [PEERS: {activePeers}]
+                </span>
+              )}
+
+              {/* QR Code Popover Button (works for both Watch Party Link & Local LAN) */}
+              <button
+                type="button"
+                className={`brutalist-btn sm ${showQrPopover ? 'active' : ''}`}
+                onClick={() => {
+                  setQrTargetMode(isWatchPartyOn ? 'party' : 'lan');
+                  setShowQrPopover((v) => !v);
+                }}
+                title="Show scannable QR code for phone"
+              >
+                [⌖ QR]
+              </button>
+
+              {/* Direct Watch Party ON / OFF Toggle */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isWatchPartyOn}
+                className={`brutalist-btn sm watch-party-toggle ${isWatchPartyOn ? 'active' : ''}`}
+                onClick={handleToggleWatchParty}
+                disabled={isTunnelBusy}
+                title={
+                  isWatchPartyOn
+                    ? 'Toggle OFF to kill Watch Party link and return to local network only'
+                    : 'Toggle ON to enable Watch Party and auto-generate shareable link + QR code'
+                }
+              >
+                <span className="toggle-indicator" aria-hidden="true">
+                  {isTunnelBusy ? '✦' : isWatchPartyOn ? '◉' : '○'}
+                </span>
+                <span>
+                  WATCH PARTY: {isTunnelBusy ? 'SYNC...' : isWatchPartyOn ? 'ON' : 'OFF'}
+                </span>
+              </button>
+
+              {/* Root Directory Scan Trigger */}
+              <button
+                type="button"
+                className="brutalist-btn sm"
+                onClick={handleSelectClick}
+                disabled={isScanning}
+                title="Select or scan media library directory"
+              >
+                {isScanning ? (
+                  <>
+                    <span className="loading-spinner">■</span> [SCANNING...]
+                  </>
+                ) : (
+                  '[◈ SCAN DIR]'
+                )}
+              </button>
+            </>
           )}
         </div>
       </header>
 
       {/* Anchored Cyber-Sigil QR Code & Watch Party Link HUD Popover */}
-      {showQrPopover && !isRemoteGuest && (
+      {showQrPopover && !isGuest && (
         <div className="qr-popover-backdrop" onClick={() => setShowQrPopover(false)}>
           <div
             className="qr-hud-popover"
@@ -418,14 +428,14 @@ export const Header: React.FC<HeaderProps> = ({
                     ✦
                   </span>
                   <div>[ESTABLISHING ENCRYPTED TUNNEL...]</div>
-                  <div style={{ fontSize: '0.68rem', opacity: 0.7 }}>
+                  <div style={{ fontSize: '0.875rem', opacity: 0.78 }}>
                     LINK & QR WILL APPEAR AUTOMATICALLY
                   </div>
                 </div>
               ) : qrTargetMode === 'party' && !tunnelStatus?.invite_url ? (
                 <div className="qr-connecting-state qr-error-state">
                   <div style={{ fontWeight: 900 }}>[PUBLIC TUNNEL UNAVAILABLE]</div>
-                  <div style={{ fontSize: '0.66rem', opacity: 0.8 }}>
+                  <div style={{ fontSize: '0.875rem', opacity: 0.85 }}>
                     {tunnelStatus?.error || 'PUBLIC LINK COULD NOT BE GENERATED.'}
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', justifyContent: 'center', marginTop: '6px' }}>
@@ -489,7 +499,7 @@ export const Header: React.FC<HeaderProps> = ({
               ) : activeShareUrl ? (
                 <div className="qr-connecting-state qr-error-state">
                   <div style={{ fontWeight: 900 }}>[QR PAYLOAD TOO LONG]</div>
-                  <div style={{ fontSize: '0.66rem', opacity: 0.8 }}>
+                  <div style={{ fontSize: '0.875rem', opacity: 0.85 }}>
                     USE [COPY] BELOW TO SHARE THIS LINK.
                   </div>
                 </div>
@@ -536,8 +546,8 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       )}
 
-      {/* Path input modal for Web LAN clients without native Tauri dialog */}
-      {showPathModal && (
+      {/* Path input modal for Web host clients without native Tauri dialog */}
+      {showPathModal && !isGuest && (
         <div className="modal-overlay" onClick={() => setShowPathModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header-row">

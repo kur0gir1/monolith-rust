@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
 import { MediaItem, PartyState, ServerStatus, TunnelStatus } from './types/media';
-import { api, setInviteTokenManual } from './api/client';
+import { api, isGuestClient, setInviteTokenManual } from './api/client';
 import { NoiseOverlay } from './components/NoiseOverlay';
 import { Header } from './components/Header';
 import { MediaBrowser } from './components/MediaBrowser';
@@ -27,6 +27,7 @@ export const App: React.FC = () => {
   const [needsInviteAuth, setNeedsInviteAuth] = useState(false);
   const [inviteInput, setInviteInput] = useState('');
   const syncEpochRef = useRef(0);
+  const isGuest = isGuestClient();
 
   const handleProgressUpdate = useCallback(
     (mediaId: string, currentTime: number, duration: number) => {
@@ -214,6 +215,7 @@ export const App: React.FC = () => {
         serverStatus={serverStatus}
         selectedDirectory={selectedDirectory}
         onSelectDirectory={handleSelectDirectory}
+        onRefreshLibrary={loadData}
         isScanning={isScanning}
         partyState={partyState}
         onPartyStateChange={handlePartyStateChange}
@@ -300,7 +302,9 @@ export const App: React.FC = () => {
                 watchProgress={watchProgress}
                 onSelectItem={handleSelectItem}
                 onTriggerScan={() => handleSelectDirectory()}
+                onRefresh={loadData}
                 isScanning={isScanning}
+                isGuest={isGuest}
               />
             ) : selectedItem ? (
               <Suspense
