@@ -259,12 +259,12 @@ export class ApiClient {
     id: string,
     audioIndex?: number,
     startSeconds?: number,
-    lowBandwidth?: boolean
+    maxQuality?: number
   ): string {
     const qs: string[] = [];
     if (audioIndex !== undefined) qs.push(`audio=${audioIndex}`);
     if (startSeconds !== undefined && startSeconds >= 3) qs.push(`start=${Math.floor(startSeconds)}`);
-    if (lowBandwidth) qs.push('q=720');
+    if (maxQuality !== undefined) qs.push(`q=${maxQuality}`);
     const query = qs.length > 0 ? `?${qs.join('&')}` : '';
     return appendInviteParam(
       `${this.baseUrl}/api/stream/${encodeURIComponent(id)}/master.m3u8${query}`

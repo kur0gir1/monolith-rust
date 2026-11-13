@@ -8,7 +8,7 @@ pub use pipeline::{
     build_ffmpeg_transcode_args, build_ffmpeg_transcode_args_from,
     build_ffmpeg_transcode_args_with_options, generate_master_playlist,
     generate_master_playlist_with_options, generate_master_playlist_with_params,
-    normalize_max_width,
+    max_width_for_quality, normalize_max_width,
 };
 pub use session::SessionManager;
 pub use subtitles::extract_webvtt_subtitles;

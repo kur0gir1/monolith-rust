@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use crate::app_state::AppState;
 use crate::error::AppError;
 use crate::transcoder::{
-    extract_webvtt_subtitles, generate_master_playlist_with_options, normalize_max_width,
+    extract_webvtt_subtitles, generate_master_playlist_with_options, max_width_for_quality,
+    normalize_max_width,
 };
 
 #[derive(Debug, Deserialize)]
@@ -102,9 +103,7 @@ pub async fn get_master_playlist(
     };
 
     let invite = extract_invite(&req_headers, &query);
-    let max_width = query
-        .q
-        .map(|q| normalize_max_width(Some(if q <= 720 { 1280 } else { 2560 })));
+    let max_width = max_width_for_quality(query.q);
 
     let playlist_content = generate_master_playlist_with_options(
         &id,
@@ -212,7 +211,7 @@ pub async fn get_variant_playlist(
     Query(query): Query<AudioQuery>,
 ) -> Result<Response, AppError> {
     let invite = extract_invite(&req_headers, &query);
-    let max_width = normalize_max_width(query.q.map(|q| if q <= 720 { 1280 } else { 2560 }));
+    let max_width = normalize_max_width(max_width_for_quality(query.q));
     serve_variant_playlist(
         &state,
         &id,

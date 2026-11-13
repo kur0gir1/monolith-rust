@@ -138,6 +138,8 @@ impl SessionManager {
         let cap_w = crate::transcoder::normalize_max_width(Some(max_width));
         if cap_w <= 1280 {
             format!("{}_{}_{}_720", media_id, audio_index, start_seconds)
+        } else if cap_w <= 1920 {
+            format!("{}_{}_{}_1080", media_id, audio_index, start_seconds)
         } else {
             format!("{}_{}_{}", media_id, audio_index, start_seconds)
         }

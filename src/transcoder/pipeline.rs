@@ -33,12 +33,26 @@ fn extend_hls_fmp4_args(args: &mut Vec<String>, output_str: String) {
     ]);
 }
 
-/// Normalizes an optional target width cap into 720p-class (1280) or QHD/FHD-class (2560).
+/// Normalizes an optional target width cap into 720p (1280), 1080p (1920), or QHD (2560).
 pub fn normalize_max_width(max_width: Option<u32>) -> u32 {
     match max_width {
         Some(w) if w <= 1280 => 1280,
+        Some(w) if w <= 1920 => 1920,
         _ => 2560,
     }
+}
+
+/// Maps a vertical quality height hint (`q=720`, `q=1080`, etc.) to a max pixel width cap.
+pub fn max_width_for_quality(quality_height: Option<u32>) -> Option<u32> {
+    quality_height.map(|q| {
+        if q <= 720 {
+            1280
+        } else if q <= 1080 {
+            1920
+        } else {
+            2560
+        }
+    })
 }
 
 /// Builds FFmpeg command line arguments for HLS dynamic transcoding starting at `start_seconds`.
@@ -59,7 +73,7 @@ pub fn build_ffmpeg_transcode_args_from(
     )
 }
 
-/// Builds FFmpeg command line arguments with an explicit `max_width` cap (1280 low-bandwidth, 2560 QHD/FHD default).
+/// Builds FFmpeg command line arguments with an explicit `max_width` cap (1280 720p, 1920 1080p Watch Party, 2560 QHD default).
 pub fn build_ffmpeg_transcode_args_with_options(
     mode: &TranscodeMode,
     input_path: &Path,
@@ -75,6 +89,8 @@ pub fn build_ffmpeg_transcode_args_with_options(
     let capped_w = normalize_max_width(Some(max_width));
     let (level, v_bitrate, v_maxrate, v_bufsize, a_bitrate) = if capped_w <= 1280 {
         ("4.0", "2000k", "2500k", "5000k", "128k")
+    } else if capped_w <= 1920 {
+        ("4.1", "4500k", "5M", "10M", "160k")
     } else {
         ("5.0", "7500k", "9M", "18M", "192k")
     };
@@ -256,7 +272,7 @@ pub fn generate_master_playlist_with_options(
 
     let audio = audio_index.unwrap_or(0);
     let start = start_seconds.unwrap_or(0);
-    let base_path = if cap_w <= 1280 {
+    let base_path = if cap_w <= 1920 {
         format!("/api/stream/{}/v/{}/{}/{}/index.m3u8", media_id, cap_w, audio, start)
     } else {
         format!("/api/stream/{}/s/{}/{}/index.m3u8", media_id, audio, start)
@@ -267,6 +283,8 @@ pub fn generate_master_playlist_with_options(
     };
     let (bandwidth, codecs) = if cap_w <= 1280 {
         (2_500_000, "avc1.640028,mp4a.40.2")
+    } else if cap_w <= 1920 {
+        (5_000_000, "avc1.640029,mp4a.40.2")
     } else {
         (9_000_000, "avc1.640032,mp4a.40.2")
     };
@@ -313,6 +331,19 @@ mod tests {
             .any(|a| a.contains("scale_cuda") && a.contains("min(1280,iw)")));
         assert!(mobile_args.windows(2).any(|w| w[0] == "-b:v" && w[1] == "2000k"));
 
+        let party_args = build_ffmpeg_transcode_args_with_options(
+            &TranscodeMode::NvencCuda,
+            Path::new("movie.mkv"),
+            Path::new("index.m3u8"),
+            0,
+            0,
+            max_width_for_quality(Some(1080)).unwrap(),
+        );
+        assert!(party_args
+            .iter()
+            .any(|a| a.contains("scale_cuda") && a.contains("min(1920,iw)")));
+        assert!(party_args.windows(2).any(|w| w[0] == "-b:v" && w[1] == "4500k"));
+
         let master = generate_master_playlist_with_params(
             "abc",
             3832,
@@ -325,6 +356,19 @@ mod tests {
         assert!(master.contains("RESOLUTION=2560x1068"));
         assert!(master.contains("CODECS=\"avc1.640032,mp4a.40.2\""));
         assert!(master.contains("/api/stream/abc/s/0/879/index.m3u8?invite=tok123"));
+
+        let master_1080 = generate_master_playlist_with_options(
+            "abc",
+            3840,
+            2160,
+            Some(0),
+            Some(0),
+            Some("tok123"),
+            max_width_for_quality(Some(1080)),
+        );
+        assert!(master_1080.contains("RESOLUTION=1920x1080"));
+        assert!(master_1080.contains("CODECS=\"avc1.640029,mp4a.40.2\""));
+        assert!(master_1080.contains("/api/stream/abc/v/1920/0/0/index.m3u8?invite=tok123"));
 
         let master_720 = generate_master_playlist_with_options(
             "abc",
