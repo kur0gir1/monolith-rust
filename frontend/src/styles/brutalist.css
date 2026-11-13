@@ -241,11 +241,11 @@ strong {
   gap: 8px;
 }
 
-/* Brutalist Cyber-Sigil Buttons */
+/* Brutalist Cyber-Sigil Buttons (Inactive = Grayed Out, Active = Solid White) */
 .brutalist-btn {
-  background: var(--bg-panel);
-  color: #ffffff;
-  border: var(--border-thick);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  border: var(--border-gray);
   padding: 7px 13px;
   font-family: var(--font-display);
   font-size: 0.9rem;
@@ -261,12 +261,7 @@ strong {
   user-select: none;
   min-height: 36px;
   position: relative;
-}
-
-.brutalist-btn:hover:not(:disabled) {
-  background: #ffffff;
-  color: #000000;
-  border-color: #ffffff;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
 .brutalist-btn:focus-visible {
@@ -279,14 +274,8 @@ strong {
 }
 
 .brutalist-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
-}
-
-.brutalist-btn.active {
-  background: #ffffff;
-  color: #000000;
-  border-color: #ffffff;
 }
 
 .brutalist-btn.sm {
@@ -294,11 +283,92 @@ strong {
   font-size: 0.875rem;
   border: var(--border-gray);
   background: var(--bg-elevated);
+  color: var(--text-muted);
   min-height: 32px;
 }
 
+@media (hover: hover) {
+  .brutalist-btn:hover:not(:disabled),
+  .brutalist-btn.sm:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: #ffffff;
+    border-color: #71717a;
+  }
+}
+
+.brutalist-btn.active,
+.brutalist-btn.sm.active {
+  background: #ffffff;
+  color: #000000;
+  border-color: #ffffff;
+  font-weight: 900;
+}
+
 .watch-party-toggle {
-  border: var(--border-thick) !important;
+  border: var(--border-gray) !important;
+  font-weight: 900;
+}
+
+.watch-party-toggle[aria-checked="true"],
+.watch-party-toggle.active {
+  border-color: #ffffff !important;
+}
+
+/* Segmented Sliding View-Mode Switch (GRID <-> LIST) */
+.view-mode-slider {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  min-width: 164px;
+  min-height: 34px;
+  padding: 2px;
+  background: var(--bg-elevated);
+  border: var(--border-gray);
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.view-mode-slider:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.view-slider-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  bottom: 2px;
+  width: calc(50% - 2px);
+  background: #ffffff;
+  transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 1;
+}
+
+.view-slider-thumb.is-list {
+  transform: translateX(100%);
+}
+
+.view-slider-option {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 3px 10px;
+  color: var(--text-muted);
+  font-weight: 700;
+  white-space: nowrap;
+  transition: color 0.14s ease;
+}
+
+.view-slider-option.active {
+  color: #000000;
   font-weight: 900;
 }
 
@@ -316,9 +386,9 @@ strong {
   font-size: 0.8125rem;
   font-weight: 700;
   letter-spacing: 0.04em;
-  border: var(--border-gray);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
+  border: var(--border-dim);
+  background: var(--bg-panel);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
@@ -703,7 +773,7 @@ strong {
 
 .folder-tree-item {
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   border: 0;
   border-bottom: var(--border-dim);
   padding: 8px 10px;
@@ -762,8 +832,10 @@ strong {
 }
 
 .browser-content-pane {
-  flex: 1;
+  flex: 1 1 0%;
   min-width: 0;
+  width: 100%;
+  align-self: stretch;
   container-type: inline-size;
 }
 
@@ -881,6 +953,8 @@ strong {
   background: var(--bg-panel);
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
   cursor: pointer;
   transition: transform 0.05s ease, border-color 0.1s ease;
   position: relative;
@@ -1152,12 +1226,18 @@ strong {
 @container main-workspace (max-width: 760px) {
   .browser-workspace {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .folder-sidebar {
     width: 100%;
     position: static;
-    max-height: 180px;
+    max-height: 200px;
+  }
+
+  .browser-content-pane {
+    width: 100%;
+    flex: none;
   }
 
   .mobile-bottom-bar {
@@ -2134,6 +2214,13 @@ input[type="range"].brutalist-slider:focus-visible {
 
   .browser-workspace {
     flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .browser-content-pane {
+    flex: 1 1 0%;
+    width: auto;
+    min-width: 0;
   }
 
   .folder-sidebar {

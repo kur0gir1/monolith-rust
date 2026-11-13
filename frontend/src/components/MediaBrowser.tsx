@@ -486,20 +486,26 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
 
           <button
             type="button"
-            className={`brutalist-btn sm ${viewMode === 'grid' ? 'active' : ''}`}
-            onClick={() => setViewMode('grid')}
+            role="switch"
+            aria-checked={viewMode === 'list'}
+            aria-label="Toggle directory display between Grid and List"
+            className="view-mode-slider"
+            onClick={() => setViewMode((m) => (m === 'grid' ? 'list' : 'grid'))}
+            title="Switch between Grid and List view"
           >
-            [⊞ GRID]
-          </button>
-          <button
-            type="button"
-            className={`brutalist-btn sm ${viewMode === 'list' ? 'active' : ''}`}
-            onClick={() => setViewMode('list')}
-          >
-            [≡ LIST]
+            <span
+              className={`view-slider-thumb ${viewMode === 'list' ? 'is-list' : 'is-grid'}`}
+              aria-hidden="true"
+            />
+            <span className={`view-slider-option ${viewMode === 'grid' ? 'active' : ''}`}>
+              ⊞ GRID
+            </span>
+            <span className={`view-slider-option ${viewMode === 'list' ? 'active' : ''}`}>
+              ≡ LIST
+            </span>
           </button>
 
-          <span className="badge badge-inverted">
+          <span className="badge">
             {isGuest ? `${filteredItems.length} VIDEOS` : `${filteredItems.length}/${items.length}`}
           </span>
           {items.length > 0 && currentFolderWatchedPercent > 0 && (
@@ -753,8 +759,11 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
         <nav className="mobile-bottom-bar" aria-label="Quick Navigation">
           <button
             type="button"
-            className={`brutalist-btn sm ${currentFolder === '' ? 'active' : ''}`}
-            onClick={() => setCurrentFolder('')}
+            className={`brutalist-btn sm ${currentFolder === '' && !sidebarOpen ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentFolder('');
+              setSidebarOpen(false);
+            }}
           >
             {isGuest ? '[ALL]' : '[ROOT]'}
           </button>
@@ -772,13 +781,6 @@ export const MediaBrowser: React.FC<MediaBrowserProps> = ({
               {isGuest ? `[FOLDERS (${allFolders.length})]` : `[DIRS (${allFolders.length})]`}
             </button>
           )}
-          <button
-            type="button"
-            className="brutalist-btn sm"
-            onClick={() => setViewMode((m) => (m === 'grid' ? 'list' : 'grid'))}
-          >
-            [{viewMode === 'grid' ? 'LIST VIEW' : 'GRID VIEW'}]
-          </button>
         </nav>
       )}
     </div>
